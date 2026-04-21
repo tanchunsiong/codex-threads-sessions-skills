@@ -302,6 +302,7 @@ class CodexRepairResult:
     title: str
     backup_dir: Path | None
     inserted_task_complete_events: int
+    normalized_final_answer_phases: int
     dry_run: bool
 
 
@@ -1274,7 +1275,7 @@ class CodexStore:
                             "payload": {
                                 "type": "agent_message",
                                 "message": assistant_text,
-                                "phase": "final",
+                                "phase": "final_answer",
                                 "memory_citation": None,
                             },
                         }
@@ -1289,7 +1290,7 @@ class CodexStore:
                                 "type": "message",
                                 "role": "assistant",
                                 "content": [{"type": "output_text", "text": assistant_text}],
-                                "phase": "final",
+                                "phase": "final_answer",
                             },
                         }
                     )
@@ -1410,7 +1411,9 @@ class CodexStore:
         if not thread.rollout_path.exists():
             raise BridgeError(f"Codex rollout was not found at '{thread.rollout_path}'.")
 
-        repaired_lines, inserted_task_complete_events = self._repair_rollout_lines(thread.rollout_path)
+        repaired_lines, inserted_task_complete_events, normalized_final_answer_phases = self._repair_rollout_lines(
+            thread.rollout_path
+        )
 
         backup_dir: Path | None = None
         if not dry_run and create_backup:
@@ -1423,7 +1426,7 @@ class CodexStore:
             )
             backup_dir = backup.backup_dir
 
-        if not dry_run and inserted_task_complete_events:
+        if not dry_run and (inserted_task_complete_events or normalized_final_answer_phases):
             thread.rollout_path.write_text("".join(line + "\n" for line in repaired_lines), encoding="utf-8")
 
         return CodexRepairResult(
@@ -1431,6 +1434,7 @@ class CodexStore:
             title=thread.title,
             backup_dir=backup_dir,
             inserted_task_complete_events=inserted_task_complete_events,
+            normalized_final_answer_phases=normalized_final_answer_phases,
             dry_run=dry_run,
         )
 
@@ -1701,9 +1705,10 @@ class CodexStore:
 
         rollout_path.write_text("".join(line + "\n" for line in rewritten), encoding="utf-8")
 
-    def _repair_rollout_lines(self, rollout_path: Path) -> tuple[list[str], int]:
+    def _repair_rollout_lines(self, rollout_path: Path) -> tuple[list[str], int, int]:
         repaired_entries: list[str] = []
         inserted = 0
+        phase_rewrites = 0
         current_turn_id: str | None = None
         started_ms: int | None = None
         saw_completion = False
@@ -1745,6 +1750,18 @@ class CodexStore:
                 inner = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
                 entry_timestamp_ms = _utc_ms_from_iso(str(payload["timestamp"]))
 
+                if item_type == "event_msg" and inner.get("type") == "agent_message" and inner.get("phase") == "final":
+                    inner["phase"] = "final_answer"
+                    phase_rewrites += 1
+                elif (
+                    item_type == "response_item"
+                    and inner.get("type") == "message"
+                    and inner.get("role") == "assistant"
+                    and inner.get("phase") == "final"
+                ):
+                    inner["phase"] = "final_answer"
+                    phase_rewrites += 1
+
                 if item_type == "event_msg" and inner.get("type") == "task_started":
                     flush(next_timestamp_ms=entry_timestamp_ms)
                     current_turn_id = str(inner.get("turn_id") or "")
@@ -1779,7 +1796,7 @@ class CodexStore:
                                         break
 
         flush()
-        return repaired_entries, inserted
+        return repaired_entries, inserted, phase_rewrites
 
     def _rewrite_jsonl_without(self, path: Path, key: str, value: str) -> None:
         if not path.exists():

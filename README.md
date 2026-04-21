@@ -56,7 +56,7 @@ python3 scripts/codex_thread_bridge.py restore-codex <backup-dir>
 
 Imported OpenCode sessions default to a Codex title of `opencode <original title>`. Use `--title-prefix` or `--title` if you need a different naming scheme.
 If you import with `--cwd-override`, the title defaults to `opencode <original OpenCode cwd> <original title>` so the source directory stays visible even after the Codex `cwd` changes.
-New imports now write completed Codex turns directly. If you imported threads before this fix and `codex resume` shows `Conversation interrupted`, run `repair-codex-imports`.
+New imports now write completed Codex turns directly with native-looking assistant metadata. If you imported threads before this fix and `codex resume` shows `Conversation interrupted` or only shows user prompts, run `repair-codex-imports`.
 By default, OpenCode listing and import only consider top-level sessions, which matches the smaller set shown in OpenCode. Add `--all-sessions` if you want child/subagent sessions too.
 `delete-opencode` deletes the matched session plus all descendant child sessions in the same tree.
 
@@ -77,6 +77,6 @@ By default, OpenCode listing and import only consider top-level sessions, which 
 - `search-opencode` and `delete-opencode` default to top-level OpenCode sessions only. Add `--all-sessions` to target child/subagent sessions directly.
 - OpenCode deletion removes the session subtree from the local OpenCode database and storage files, and `restore-opencode` rebuilds both from backup.
 - `search-codex --include-session-index` can find threads by older recorded names from `~/.codex/session_index.jsonl`.
-- `repair-codex-imports` backfills missing `task_complete` events on older OpenCode imports so assistant replies render normally in `codex resume`.
+- `repair-codex-imports` backfills missing `task_complete` events and normalizes imported assistant replies to Codex's `final_answer` phase so they render normally in `codex resume`.
 - `retarget-codex-cwd` keeps the original imported OpenCode directory in rollout metadata and renames the thread to `opencode <original cwd> <title>`.
 - Deletion cleans structured Codex state. It does not rewrite append-only logs like `~/.codex/log/codex-tui.log`.

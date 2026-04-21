@@ -26,7 +26,7 @@ Use the bundled CLI at `scripts/codex_thread_bridge.py`.
    - `python3 scripts/codex_thread_bridge.py retarget-codex-cwd --title-prefix "opencode " --cwd /home/dreamtcs --dry-run`
    - `python3 scripts/codex_thread_bridge.py retarget-codex-cwd <thread-id> --cwd /home/dreamtcs`
    - By default this creates a Codex backup before rewriting the thread metadata
-4. Repair older imported Codex threads if `codex resume` shows `Conversation interrupted`:
+4. Repair older imported Codex threads if `codex resume` shows `Conversation interrupted` or only shows user prompts:
    - `python3 scripts/codex_thread_bridge.py repair-codex-imports --dry-run`
    - `python3 scripts/codex_thread_bridge.py repair-codex-imports --yes`
    - `python3 scripts/codex_thread_bridge.py repair-codex-imports <thread-id> --dry-run`
@@ -54,7 +54,7 @@ Use the bundled CLI at `scripts/codex_thread_bridge.py`.
 - `delete-codex` refuses to remove the current live thread unless `--allow-current-thread` is passed.
 - If a thread was renamed later, `search-codex --include-session-index` can still find it by an older recorded thread name from `~/.codex/session_index.jsonl`.
 - Imported Codex thread titles default to `opencode <original title>`. Override that with `--title` or `--title-prefix` if needed.
-- New imports now write completed turns directly. `repair-codex-imports` backfills that missing `task_complete` metadata for older imports.
+- New imports now write completed turns directly. `repair-codex-imports` backfills missing `task_complete` metadata and normalizes imported assistant replies to the native `final_answer` phase for older imports.
 - `retarget-codex-cwd` rewrites the Codex thread `cwd` and renames it to `opencode <original OpenCode cwd> <title>` so the source directory is still visible.
 - Deletion backs up the thread row, session index lines, history lines, rollout JSONL, shell snapshots, and SQLite log rows under `~/.codex/thread-bridge-backups/`.
 - `delete-codex --no-backup` skips that safety net and removes the thread state directly.

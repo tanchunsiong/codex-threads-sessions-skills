@@ -376,6 +376,16 @@ class CodexJsonlRewriteTests(unittest.TestCase):
             self.assertEqual(len(task_complete), 1)
             self.assertEqual(task_complete[0]["payload"]["last_agent_message"], "world")
 
+            assistant_messages = [
+                json.loads(line)
+                for line in rollout_lines
+                if json.loads(line).get("type") == "response_item"
+                and (json.loads(line).get("payload") or {}).get("type") == "message"
+                and (json.loads(line).get("payload") or {}).get("role") == "assistant"
+            ]
+            self.assertEqual(len(assistant_messages), 1)
+            self.assertEqual(assistant_messages[0]["payload"]["phase"], "final_answer")
+
     def test_repair_imported_thread_backfills_task_complete(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -500,11 +510,154 @@ class CodexJsonlRewriteTests(unittest.TestCase):
 
             repaired = rollout_path.read_text(encoding="utf-8")
             self.assertEqual(result.inserted_task_complete_events, 1)
+            self.assertEqual(result.normalized_final_answer_phases, 2)
             self.assertIsNotNone(result.backup_dir)
             self.assertIn('"type":"task_complete"', repaired)
+            self.assertIn('"phase":"final_answer"', repaired)
 
             second_pass = store.repair_imported_thread(thread, dry_run=True)
             self.assertEqual(second_pass.inserted_task_complete_events, 0)
+            self.assertEqual(second_pass.normalized_final_answer_phases, 0)
+
+    def test_repair_imported_thread_writes_phase_only_fixes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            codex_root, state_db = _create_codex_fixture(temp_path)
+            rollout_path = codex_root / "sessions" / "2026" / "01" / "01" / "rollout-thread-2.jsonl"
+            rollout_path.parent.mkdir(parents=True, exist_ok=True)
+            rollout_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "timestamp": "2026-01-01T00:00:00.000Z",
+                                "type": "session_meta",
+                                "payload": {
+                                    "id": "thread-2",
+                                    "timestamp": "2026-01-01T00:00:00.000Z",
+                                    "cwd": "/tmp/project",
+                                    "import_meta": {"bridge": "codex-thread-bridge", "source": "opencode"},
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-01-01T00:00:00.001Z",
+                                "type": "event_msg",
+                                "payload": {"type": "thread_name_updated", "thread_id": "thread-2", "thread_name": "opencode Demo"},
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-01-01T00:00:01.000Z",
+                                "type": "event_msg",
+                                "payload": {"type": "task_started", "turn_id": "turn-2", "started_at": 1},
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-01-01T00:00:01.001Z",
+                                "type": "turn_context",
+                                "payload": {"turn_id": "turn-2", "cwd": "/tmp/project"},
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-01-01T00:00:01.002Z",
+                                "type": "response_item",
+                                "payload": {
+                                    "type": "message",
+                                    "role": "user",
+                                    "content": [{"type": "input_text", "text": "hello"}],
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-01-01T00:00:01.003Z",
+                                "type": "event_msg",
+                                "payload": {"type": "user_message", "message": "hello"},
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-01-01T00:00:02.000Z",
+                                "type": "event_msg",
+                                "payload": {"type": "agent_message", "message": "world", "phase": "final"},
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-01-01T00:00:02.001Z",
+                                "type": "response_item",
+                                "payload": {
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [{"type": "output_text", "text": "world"}],
+                                    "phase": "final",
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-01-01T00:00:02.002Z",
+                                "type": "event_msg",
+                                "payload": {
+                                    "type": "task_complete",
+                                    "turn_id": "turn-2",
+                                    "last_agent_message": "world",
+                                    "completed_at": 2,
+                                    "duration_ms": 1002,
+                                },
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            conn = sqlite3.connect(state_db)
+            conn.execute(
+                """
+                INSERT INTO threads (
+                    id, rollout_path, created_at, updated_at, source, model_provider, cwd, title,
+                    sandbox_policy, approval_mode, tokens_used, has_user_event, archived,
+                    cli_version, first_user_message, memory_mode, created_at_ms, updated_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "thread-2",
+                    str(rollout_path),
+                    1,
+                    2,
+                    "cli",
+                    "openai",
+                    "/tmp/project",
+                    "opencode Demo",
+                    '{"type":"danger-full-access"}',
+                    "never",
+                    0,
+                    1,
+                    0,
+                    "0.122.0",
+                    "hello",
+                    "enabled",
+                    1000,
+                    2000,
+                ),
+            )
+            conn.commit()
+            conn.close()
+
+            store = CodexStore(codex_root=codex_root)
+            thread = store.resolve_thread("thread-2")
+            result = store.repair_imported_thread(thread, dry_run=False)
+
+            repaired = rollout_path.read_text(encoding="utf-8")
+            self.assertEqual(result.inserted_task_complete_events, 0)
+            self.assertEqual(result.normalized_final_answer_phases, 2)
+            self.assertIn('"phase":"final_answer"', repaired)
 
     def test_retarget_thread_cwd_rewrites_rollout_and_restores_from_backup(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

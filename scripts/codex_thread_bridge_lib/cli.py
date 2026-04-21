@@ -503,7 +503,8 @@ def _handle_repair(args: argparse.Namespace) -> int:
         backup_text = str(result.backup_dir) if result.backup_dir is not None else "disabled"
         print(
             f"{prefix}: {result.thread_id}  title={result.title!r}  "
-            f"task_complete_inserted={result.inserted_task_complete_events}  backup={backup_text}"
+            f"task_complete_inserted={result.inserted_task_complete_events}  "
+            f"final_answer_phases={result.normalized_final_answer_phases}  backup={backup_text}"
         )
         if index + 1 < len(unique_threads):
             print()
