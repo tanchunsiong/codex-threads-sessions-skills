@@ -104,6 +104,19 @@ def _build_parser() -> argparse.ArgumentParser:
     retarget_parser.add_argument("--backup-root", type=Path)
     retarget_parser.add_argument("--allow-current-thread", action="store_true")
 
+    repair_parser = subparsers.add_parser("repair-codex-imports")
+    repair_parser.add_argument("refs", nargs="*", help="Codex thread IDs or exact titles.")
+    repair_parser.add_argument("--contains", action="store_true", help="Allow a unique title substring match.")
+    repair_parser.add_argument("--title-prefix")
+    repair_parser.add_argument("--title-contains")
+    repair_parser.add_argument("--include-session-index", action="store_true")
+    repair_parser.add_argument("--case-sensitive", action="store_true")
+    repair_parser.add_argument("--dry-run", action="store_true")
+    repair_parser.add_argument("--yes", action="store_true", help="Required for a real rewrite.")
+    repair_parser.add_argument("--no-backup", action="store_true", help="Skip backup creation before rewriting.")
+    repair_parser.add_argument("--backup-root", type=Path)
+    repair_parser.add_argument("--allow-current-thread", action="store_true")
+
     restore_parser = subparsers.add_parser("restore-codex")
     restore_parser.add_argument("backup_dir", type=Path)
     restore_parser.add_argument("--force", action="store_true")
@@ -445,6 +458,58 @@ def _handle_retarget(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_repair(args: argparse.Namespace) -> int:
+    if not args.dry_run and not args.yes:
+        raise BridgeError("repair-codex-imports rewrites rollout history. Re-run with --yes, or use --dry-run first.")
+
+    codex = CodexStore()
+    threads = []
+    if args.refs:
+        threads = [codex.resolve_thread(ref, contains=args.contains) for ref in args.refs]
+    elif args.title_prefix or args.title_contains:
+        matches = codex.search_threads(
+            title_prefix=args.title_prefix,
+            title_contains=args.title_contains,
+            include_session_index=args.include_session_index,
+            ignore_case=not args.case_sensitive,
+        )
+        threads = [codex.resolve_thread(match.thread_id) for match in matches]
+        if not threads:
+            print("No rows found.")
+            return 0
+    else:
+        threads = codex.imported_threads(source="opencode")
+        if not threads:
+            print("No rows found.")
+            return 0
+
+    unique_threads = []
+    seen_thread_ids = set()
+    for thread in threads:
+        if thread.id in seen_thread_ids:
+            continue
+        seen_thread_ids.add(thread.id)
+        unique_threads.append(thread)
+
+    for index, thread in enumerate(unique_threads):
+        result = codex.repair_imported_thread(
+            thread,
+            backup_root=args.backup_root,
+            create_backup=not args.no_backup,
+            dry_run=args.dry_run,
+            allow_current_thread=args.allow_current_thread,
+        )
+        prefix = "DRY RUN" if result.dry_run else "REPAIRED"
+        backup_text = str(result.backup_dir) if result.backup_dir is not None else "disabled"
+        print(
+            f"{prefix}: {result.thread_id}  title={result.title!r}  "
+            f"task_complete_inserted={result.inserted_task_complete_events}  backup={backup_text}"
+        )
+        if index + 1 < len(unique_threads):
+            print()
+    return 0
+
+
 def _handle_restore(args: argparse.Namespace) -> int:
     codex = CodexStore()
     result = codex.restore_backup(args.backup_dir, force=args.force)
@@ -486,6 +551,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _handle_delete(args)
         if args.command == "retarget-codex-cwd":
             return _handle_retarget(args)
+        if args.command == "repair-codex-imports":
+            return _handle_repair(args)
         if args.command == "restore-opencode":
             return _handle_restore_opencode(args)
         if args.command == "restore-codex":

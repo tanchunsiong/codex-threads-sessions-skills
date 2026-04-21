@@ -26,18 +26,23 @@ Use the bundled CLI at `scripts/codex_thread_bridge.py`.
    - `python3 scripts/codex_thread_bridge.py retarget-codex-cwd --title-prefix "opencode " --cwd /home/dreamtcs --dry-run`
    - `python3 scripts/codex_thread_bridge.py retarget-codex-cwd <thread-id> --cwd /home/dreamtcs`
    - By default this creates a Codex backup before rewriting the thread metadata
-4. Delete OpenCode sessions only after a dry run:
+4. Repair older imported Codex threads if `codex resume` shows `Conversation interrupted`:
+   - `python3 scripts/codex_thread_bridge.py repair-codex-imports --dry-run`
+   - `python3 scripts/codex_thread_bridge.py repair-codex-imports --yes`
+   - `python3 scripts/codex_thread_bridge.py repair-codex-imports <thread-id> --dry-run`
+   - By default this creates a Codex backup before rewriting the rollout JSONL
+5. Delete OpenCode sessions only after a dry run:
    - `python3 scripts/codex_thread_bridge.py delete-opencode <session-id> --dry-run`
    - `python3 scripts/codex_thread_bridge.py delete-opencode <session-id> --yes`
    - Query delete is also supported: `python3 scripts/codex_thread_bridge.py delete-opencode --title-prefix Greeting --dry-run`
    - `delete-opencode` removes the matched session plus all descendant child sessions in that subtree
    - If you intentionally want irreversible cleanup, add `--no-backup`
-5. Delete Codex threads only after a dry run:
+6. Delete Codex threads only after a dry run:
    - `python3 scripts/codex_thread_bridge.py delete-codex <thread-id> --dry-run`
    - `python3 scripts/codex_thread_bridge.py delete-codex <thread-id> --yes`
    - Query delete is also supported: `python3 scripts/codex_thread_bridge.py delete-codex --title-prefix TBD --include-session-index --dry-run`
    - If you intentionally want irreversible cleanup, add `--no-backup`
-6. Restore from the backup directory if needed:
+7. Restore from the backup directory if needed:
    - `python3 scripts/codex_thread_bridge.py restore-opencode <backup-dir>`
    - `python3 scripts/codex_thread_bridge.py restore-codex <backup-dir>`
 
@@ -49,6 +54,7 @@ Use the bundled CLI at `scripts/codex_thread_bridge.py`.
 - `delete-codex` refuses to remove the current live thread unless `--allow-current-thread` is passed.
 - If a thread was renamed later, `search-codex --include-session-index` can still find it by an older recorded thread name from `~/.codex/session_index.jsonl`.
 - Imported Codex thread titles default to `opencode <original title>`. Override that with `--title` or `--title-prefix` if needed.
+- New imports now write completed turns directly. `repair-codex-imports` backfills that missing `task_complete` metadata for older imports.
 - `retarget-codex-cwd` rewrites the Codex thread `cwd` and renames it to `opencode <original OpenCode cwd> <title>` so the source directory is still visible.
 - Deletion backs up the thread row, session index lines, history lines, rollout JSONL, shell snapshots, and SQLite log rows under `~/.codex/thread-bridge-backups/`.
 - `delete-codex --no-backup` skips that safety net and removes the thread state directly.

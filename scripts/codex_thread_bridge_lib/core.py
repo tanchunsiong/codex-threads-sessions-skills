@@ -898,6 +898,17 @@ class CodexStore:
 
         raise BridgeError(f"Codex thread '{ref}' was not found.")
 
+    def imported_threads(self, *, source: str | None = None) -> list[CodexThread]:
+        matches: list[CodexThread] = []
+        for thread in self.list_threads():
+            import_meta = self._thread_import_meta(thread)
+            if not import_meta:
+                continue
+            if source is not None and str(import_meta.get("source") or "") != source:
+                continue
+            matches.append(thread)
+        return matches
+
     def _latest_thread_row(self) -> dict[str, Any] | None:
         threads = self.list_threads()
         return threads[0].row if threads else None
@@ -1251,6 +1262,8 @@ class CodexStore:
                 )
             )
 
+            completed_ms: int | None = None
+            last_assistant_text: str | None = None
             for index, (assistant_message, assistant_text) in enumerate(assistant_group, start=1):
                 timestamp_ms = assistant_message.created_ms or (started_ms + 1000 * index)
                 lines.append(
@@ -1277,6 +1290,26 @@ class CodexStore:
                                 "role": "assistant",
                                 "content": [{"type": "output_text", "text": assistant_text}],
                                 "phase": "final",
+                            },
+                        }
+                    )
+                )
+                completed_ms = timestamp_ms + 1
+                last_assistant_text = assistant_text
+
+            if completed_ms is not None and last_assistant_text is not None:
+                task_complete_ms = completed_ms + 1
+                lines.append(
+                    _compact_json(
+                        {
+                            "timestamp": _utc_iso_from_ms(task_complete_ms),
+                            "type": "event_msg",
+                            "payload": {
+                                "type": "task_complete",
+                                "turn_id": turn_id,
+                                "last_agent_message": last_assistant_text,
+                                "completed_at": task_complete_ms // 1000,
+                                "duration_ms": max(0, task_complete_ms - started_ms),
                             },
                         }
                     )
@@ -1359,6 +1392,45 @@ class CodexStore:
             old_cwd=old_cwd,
             new_cwd=new_cwd,
             backup_dir=backup_dir,
+            dry_run=dry_run,
+        )
+
+    def repair_imported_thread(
+        self,
+        thread: CodexThread,
+        *,
+        backup_root: Path | None = None,
+        create_backup: bool = True,
+        dry_run: bool = False,
+        allow_current_thread: bool = False,
+    ) -> CodexRepairResult:
+        import_meta = self._thread_import_meta(thread)
+        if str(import_meta.get("source") or "") != "opencode":
+            raise BridgeError(f"Codex thread '{thread.id}' is not an imported OpenCode thread.")
+        if not thread.rollout_path.exists():
+            raise BridgeError(f"Codex rollout was not found at '{thread.rollout_path}'.")
+
+        repaired_lines, inserted_task_complete_events = self._repair_rollout_lines(thread.rollout_path)
+
+        backup_dir: Path | None = None
+        if not dry_run and create_backup:
+            backup = self.delete_thread(
+                thread,
+                backup_root=backup_root,
+                create_backup=True,
+                dry_run=True,
+                allow_current_thread=allow_current_thread,
+            )
+            backup_dir = backup.backup_dir
+
+        if not dry_run and inserted_task_complete_events:
+            thread.rollout_path.write_text("".join(line + "\n" for line in repaired_lines), encoding="utf-8")
+
+        return CodexRepairResult(
+            thread_id=thread.id,
+            title=thread.title,
+            backup_dir=backup_dir,
+            inserted_task_complete_events=inserted_task_complete_events,
             dry_run=dry_run,
         )
 
@@ -1628,6 +1700,86 @@ class CodexStore:
                 rewritten.append(_compact_json(payload))
 
         rollout_path.write_text("".join(line + "\n" for line in rewritten), encoding="utf-8")
+
+    def _repair_rollout_lines(self, rollout_path: Path) -> tuple[list[str], int]:
+        repaired_entries: list[str] = []
+        inserted = 0
+        current_turn_id: str | None = None
+        started_ms: int | None = None
+        saw_completion = False
+        last_agent_message: str | None = None
+        last_turn_timestamp_ms: int | None = None
+
+        def flush(next_timestamp_ms: int | None = None) -> None:
+            nonlocal inserted, saw_completion
+            if current_turn_id is None or saw_completion or last_agent_message is None or last_turn_timestamp_ms is None:
+                return
+            task_complete_ms = last_turn_timestamp_ms + 1
+            if next_timestamp_ms is not None and next_timestamp_ms < task_complete_ms:
+                task_complete_ms = next_timestamp_ms
+            repaired_entries.append(
+                _compact_json(
+                    {
+                        "timestamp": _utc_iso_from_ms(task_complete_ms),
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "task_complete",
+                            "turn_id": current_turn_id,
+                            "last_agent_message": last_agent_message,
+                            "completed_at": task_complete_ms // 1000,
+                            "duration_ms": max(0, task_complete_ms - (started_ms or task_complete_ms)),
+                        },
+                    }
+                )
+            )
+            inserted += 1
+            saw_completion = True
+
+        with rollout_path.open(encoding="utf-8") as handle:
+            for raw_line in handle:
+                line = raw_line.rstrip("\n")
+                if not line.strip():
+                    continue
+                payload = json.loads(line)
+                item_type = payload.get("type")
+                inner = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+                entry_timestamp_ms = _utc_ms_from_iso(str(payload["timestamp"]))
+
+                if item_type == "event_msg" and inner.get("type") == "task_started":
+                    flush(next_timestamp_ms=entry_timestamp_ms)
+                    current_turn_id = str(inner.get("turn_id") or "")
+                    started_ms = int(inner.get("started_at") or 0) * 1000 or entry_timestamp_ms
+                    saw_completion = False
+                    last_agent_message = None
+                    last_turn_timestamp_ms = entry_timestamp_ms
+
+                repaired_entries.append(_compact_json(payload))
+
+                if current_turn_id is None:
+                    continue
+
+                if item_type == "event_msg":
+                    inner_type = inner.get("type")
+                    if inner_type in {"task_complete", "turn_aborted"} and str(inner.get("turn_id") or "") == current_turn_id:
+                        saw_completion = True
+                    elif inner_type == "agent_message":
+                        message = inner.get("message")
+                        if isinstance(message, str) and message:
+                            last_agent_message = message
+                        last_turn_timestamp_ms = entry_timestamp_ms
+                elif item_type == "response_item":
+                    if payload.get("payload", {}).get("type") == "message" and payload.get("payload", {}).get("role") == "assistant":
+                        last_turn_timestamp_ms = entry_timestamp_ms
+                        if last_agent_message is None:
+                            for content_part in payload["payload"].get("content") or []:
+                                if content_part.get("type") == "output_text":
+                                    text = content_part.get("text")
+                                    if isinstance(text, str) and text:
+                                        last_agent_message = text
+                                        break
+
+        flush()
+        return repaired_entries, inserted
 
     def _rewrite_jsonl_without(self, path: Path, key: str, value: str) -> None:
         if not path.exists():

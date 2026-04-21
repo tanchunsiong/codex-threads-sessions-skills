@@ -21,6 +21,61 @@ from codex_thread_bridge_lib.core import (
 )
 
 
+def _create_codex_fixture(root: Path) -> tuple[Path, Path]:
+    codex_root = root / ".codex"
+    codex_root.mkdir()
+
+    state_db = codex_root / "state_5.sqlite"
+    conn = sqlite3.connect(state_db)
+    conn.execute(
+        """
+        CREATE TABLE threads (
+            id TEXT PRIMARY KEY,
+            rollout_path TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            model_provider TEXT NOT NULL,
+            cwd TEXT NOT NULL,
+            title TEXT NOT NULL,
+            sandbox_policy TEXT NOT NULL,
+            approval_mode TEXT NOT NULL,
+            tokens_used INTEGER NOT NULL DEFAULT 0,
+            has_user_event INTEGER NOT NULL DEFAULT 0,
+            archived INTEGER NOT NULL DEFAULT 0,
+            archived_at INTEGER,
+            git_sha TEXT,
+            git_branch TEXT,
+            git_origin_url TEXT,
+            cli_version TEXT NOT NULL DEFAULT '',
+            first_user_message TEXT NOT NULL DEFAULT '',
+            agent_nickname TEXT,
+            agent_role TEXT,
+            memory_mode TEXT NOT NULL DEFAULT 'enabled',
+            model TEXT,
+            reasoning_effort TEXT,
+            agent_path TEXT,
+            created_at_ms INTEGER,
+            updated_at_ms INTEGER
+        )
+        """
+    )
+    conn.execute("CREATE TABLE thread_dynamic_tools (thread_id TEXT NOT NULL, tool_name TEXT NOT NULL)")
+    conn.execute(
+        "CREATE TABLE thread_spawn_edges (parent_thread_id TEXT NOT NULL, child_thread_id TEXT NOT NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    logs_db = codex_root / "logs_2.sqlite"
+    conn = sqlite3.connect(logs_db)
+    conn.execute("CREATE TABLE logs (id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id TEXT NOT NULL, payload TEXT)")
+    conn.commit()
+    conn.close()
+
+    return codex_root, state_db
+
+
 class RenderOpenCodeMessageTests(unittest.TestCase):
     def test_renders_text_and_tool_summary(self) -> None:
         message = OpenCodeMessage(
@@ -158,44 +213,8 @@ class CodexJsonlRewriteTests(unittest.TestCase):
     def test_search_threads_can_match_session_index_aliases(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
-            codex_root = temp_path / ".codex"
-            codex_root.mkdir()
-
-            state_db = codex_root / "state_5.sqlite"
+            codex_root, state_db = _create_codex_fixture(temp_path)
             conn = sqlite3.connect(state_db)
-            conn.execute(
-                """
-                CREATE TABLE threads (
-                    id TEXT PRIMARY KEY,
-                    rollout_path TEXT NOT NULL,
-                    created_at INTEGER NOT NULL,
-                    updated_at INTEGER NOT NULL,
-                    source TEXT NOT NULL,
-                    model_provider TEXT NOT NULL,
-                    cwd TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    sandbox_policy TEXT NOT NULL,
-                    approval_mode TEXT NOT NULL,
-                    tokens_used INTEGER NOT NULL DEFAULT 0,
-                    has_user_event INTEGER NOT NULL DEFAULT 0,
-                    archived INTEGER NOT NULL DEFAULT 0,
-                    archived_at INTEGER,
-                    git_sha TEXT,
-                    git_branch TEXT,
-                    git_origin_url TEXT,
-                    cli_version TEXT NOT NULL DEFAULT '',
-                    first_user_message TEXT NOT NULL DEFAULT '',
-                    agent_nickname TEXT,
-                    agent_role TEXT,
-                    memory_mode TEXT NOT NULL DEFAULT 'enabled',
-                    model TEXT,
-                    reasoning_effort TEXT,
-                    agent_path TEXT,
-                    created_at_ms INTEGER,
-                    updated_at_ms INTEGER
-                )
-                """
-            )
             conn.execute(
                 """
                 INSERT INTO threads (
@@ -228,7 +247,6 @@ class CodexJsonlRewriteTests(unittest.TestCase):
             conn.commit()
             conn.close()
 
-            (codex_root / "logs_2.sqlite").write_bytes(b"")
             (codex_root / "session_index.jsonl").write_text(
                 json.dumps({"id": "thread-1", "thread_name": "TBD: Old title", "updated_at": "2026-01-01T00:00:00Z"})
                 + "\n",
@@ -245,48 +263,7 @@ class CodexJsonlRewriteTests(unittest.TestCase):
     def test_import_uses_opencode_prefix_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
-            codex_root = temp_path / ".codex"
-            codex_root.mkdir()
-
-            state_db = codex_root / "state_5.sqlite"
-            conn = sqlite3.connect(state_db)
-            conn.execute(
-                """
-                CREATE TABLE threads (
-                    id TEXT PRIMARY KEY,
-                    rollout_path TEXT NOT NULL,
-                    created_at INTEGER NOT NULL,
-                    updated_at INTEGER NOT NULL,
-                    source TEXT NOT NULL,
-                    model_provider TEXT NOT NULL,
-                    cwd TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    sandbox_policy TEXT NOT NULL,
-                    approval_mode TEXT NOT NULL,
-                    tokens_used INTEGER NOT NULL DEFAULT 0,
-                    has_user_event INTEGER NOT NULL DEFAULT 0,
-                    archived INTEGER NOT NULL DEFAULT 0,
-                    archived_at INTEGER,
-                    git_sha TEXT,
-                    git_branch TEXT,
-                    git_origin_url TEXT,
-                    cli_version TEXT NOT NULL DEFAULT '',
-                    first_user_message TEXT NOT NULL DEFAULT '',
-                    agent_nickname TEXT,
-                    agent_role TEXT,
-                    memory_mode TEXT NOT NULL DEFAULT 'enabled',
-                    model TEXT,
-                    reasoning_effort TEXT,
-                    agent_path TEXT,
-                    created_at_ms INTEGER,
-                    updated_at_ms INTEGER
-                )
-                """
-            )
-            conn.commit()
-            conn.close()
-
-            (codex_root / "logs_2.sqlite").write_bytes(b"")
+            codex_root, _ = _create_codex_fixture(temp_path)
             session = OpenCodeSession(
                 info={
                     "id": "ses_test",
@@ -337,48 +314,7 @@ class CodexJsonlRewriteTests(unittest.TestCase):
     def test_import_preserves_opencode_timestamps(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
-            codex_root = temp_path / ".codex"
-            codex_root.mkdir()
-
-            state_db = codex_root / "state_5.sqlite"
-            conn = sqlite3.connect(state_db)
-            conn.execute(
-                """
-                CREATE TABLE threads (
-                    id TEXT PRIMARY KEY,
-                    rollout_path TEXT NOT NULL,
-                    created_at INTEGER NOT NULL,
-                    updated_at INTEGER NOT NULL,
-                    source TEXT NOT NULL,
-                    model_provider TEXT NOT NULL,
-                    cwd TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    sandbox_policy TEXT NOT NULL,
-                    approval_mode TEXT NOT NULL,
-                    tokens_used INTEGER NOT NULL DEFAULT 0,
-                    has_user_event INTEGER NOT NULL DEFAULT 0,
-                    archived INTEGER NOT NULL DEFAULT 0,
-                    archived_at INTEGER,
-                    git_sha TEXT,
-                    git_branch TEXT,
-                    git_origin_url TEXT,
-                    cli_version TEXT NOT NULL DEFAULT '',
-                    first_user_message TEXT NOT NULL DEFAULT '',
-                    agent_nickname TEXT,
-                    agent_role TEXT,
-                    memory_mode TEXT NOT NULL DEFAULT 'enabled',
-                    model TEXT,
-                    reasoning_effort TEXT,
-                    agent_path TEXT,
-                    created_at_ms INTEGER,
-                    updated_at_ms INTEGER
-                )
-                """
-            )
-            conn.commit()
-            conn.close()
-
-            (codex_root / "logs_2.sqlite").write_bytes(b"")
+            codex_root, state_db = _create_codex_fixture(temp_path)
             session = OpenCodeSession(
                 info={
                     "id": "ses_old",
@@ -402,6 +338,173 @@ class CodexJsonlRewriteTests(unittest.TestCase):
             self.assertIsNotNone(row)
             self.assertEqual(row[0], 1000)
             self.assertEqual(row[1], 2000)
+
+    def test_import_writes_task_complete_for_assistant_turns(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            codex_root, _ = _create_codex_fixture(temp_path)
+
+            session = OpenCodeSession(
+                info={
+                    "id": "ses_complete",
+                    "title": "Completed Session",
+                    "directory": "/tmp/project",
+                    "time": {"created": 1000, "updated": 3000},
+                },
+                messages=[
+                    OpenCodeMessage(
+                        info={"id": "msg_user", "role": "user", "time": {"created": 1000}},
+                        parts=[{"type": "text", "text": "hello"}],
+                    ),
+                    OpenCodeMessage(
+                        info={"id": "msg_assistant", "role": "assistant", "time": {"created": 2000}},
+                        parts=[{"type": "text", "text": "world"}],
+                    ),
+                ],
+            )
+
+            store = CodexStore(codex_root=codex_root)
+            result = store.import_opencode_session(session, dry_run=False)
+            rollout_lines = Path(result.rollout_path).read_text(encoding="utf-8").splitlines()
+            task_complete = [
+                json.loads(line)
+                for line in rollout_lines
+                if json.loads(line).get("type") == "event_msg"
+                and (json.loads(line).get("payload") or {}).get("type") == "task_complete"
+            ]
+
+            self.assertEqual(len(task_complete), 1)
+            self.assertEqual(task_complete[0]["payload"]["last_agent_message"], "world")
+
+    def test_repair_imported_thread_backfills_task_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            codex_root, state_db = _create_codex_fixture(temp_path)
+            rollout_path = codex_root / "sessions" / "2026" / "01" / "01" / "rollout-thread-1.jsonl"
+            rollout_path.parent.mkdir(parents=True, exist_ok=True)
+            rollout_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "timestamp": "2026-01-01T00:00:00.000Z",
+                                "type": "session_meta",
+                                "payload": {
+                                    "id": "thread-1",
+                                    "timestamp": "2026-01-01T00:00:00.000Z",
+                                    "cwd": "/tmp/project",
+                                    "import_meta": {"bridge": "codex-thread-bridge", "source": "opencode"},
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-01-01T00:00:00.001Z",
+                                "type": "event_msg",
+                                "payload": {"type": "thread_name_updated", "thread_id": "thread-1", "thread_name": "opencode Demo"},
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-01-01T00:00:01.000Z",
+                                "type": "event_msg",
+                                "payload": {"type": "task_started", "turn_id": "turn-1", "started_at": 1},
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-01-01T00:00:01.001Z",
+                                "type": "turn_context",
+                                "payload": {"turn_id": "turn-1", "cwd": "/tmp/project"},
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-01-01T00:00:01.002Z",
+                                "type": "response_item",
+                                "payload": {
+                                    "type": "message",
+                                    "role": "user",
+                                    "content": [{"type": "input_text", "text": "hello"}],
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-01-01T00:00:01.003Z",
+                                "type": "event_msg",
+                                "payload": {"type": "user_message", "message": "hello"},
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-01-01T00:00:02.000Z",
+                                "type": "event_msg",
+                                "payload": {"type": "agent_message", "message": "world", "phase": "final"},
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-01-01T00:00:02.001Z",
+                                "type": "response_item",
+                                "payload": {
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [{"type": "output_text", "text": "world"}],
+                                    "phase": "final",
+                                },
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            conn = sqlite3.connect(state_db)
+            conn.execute(
+                """
+                INSERT INTO threads (
+                    id, rollout_path, created_at, updated_at, source, model_provider, cwd, title,
+                    sandbox_policy, approval_mode, tokens_used, has_user_event, archived,
+                    cli_version, first_user_message, memory_mode, created_at_ms, updated_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "thread-1",
+                    str(rollout_path),
+                    1,
+                    2,
+                    "cli",
+                    "openai",
+                    "/tmp/project",
+                    "opencode Demo",
+                    '{"type":"danger-full-access"}',
+                    "never",
+                    0,
+                    1,
+                    0,
+                    "0.122.0",
+                    "hello",
+                    "enabled",
+                    1000,
+                    2000,
+                ),
+            )
+            conn.commit()
+            conn.close()
+
+            store = CodexStore(codex_root=codex_root)
+            thread = store.resolve_thread("thread-1")
+            result = store.repair_imported_thread(thread, backup_root=temp_path / "backups", dry_run=False)
+
+            repaired = rollout_path.read_text(encoding="utf-8")
+            self.assertEqual(result.inserted_task_complete_events, 1)
+            self.assertIsNotNone(result.backup_dir)
+            self.assertIn('"type":"task_complete"', repaired)
+
+            second_pass = store.repair_imported_thread(thread, dry_run=True)
+            self.assertEqual(second_pass.inserted_task_complete_events, 0)
 
     def test_retarget_thread_cwd_rewrites_rollout_and_restores_from_backup(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
