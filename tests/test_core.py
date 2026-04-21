@@ -58,6 +58,78 @@ class RenderOpenCodeMessageTests(unittest.TestCase):
 
 
 class CodexJsonlRewriteTests(unittest.TestCase):
+    def _create_codex_store(self, root: Path) -> CodexStore:
+        codex_root = root / ".codex"
+        codex_root.mkdir()
+
+        state_db = codex_root / "state_5.sqlite"
+        conn = sqlite3.connect(state_db)
+        conn.execute(
+            """
+            CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                rollout_path TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                model_provider TEXT NOT NULL,
+                cwd TEXT NOT NULL,
+                title TEXT NOT NULL,
+                sandbox_policy TEXT NOT NULL,
+                approval_mode TEXT NOT NULL,
+                tokens_used INTEGER NOT NULL DEFAULT 0,
+                has_user_event INTEGER NOT NULL DEFAULT 0,
+                archived INTEGER NOT NULL DEFAULT 0,
+                archived_at INTEGER,
+                git_sha TEXT,
+                git_branch TEXT,
+                git_origin_url TEXT,
+                cli_version TEXT NOT NULL DEFAULT '',
+                first_user_message TEXT NOT NULL DEFAULT '',
+                agent_nickname TEXT,
+                agent_role TEXT,
+                memory_mode TEXT NOT NULL DEFAULT 'enabled',
+                model TEXT,
+                reasoning_effort TEXT,
+                agent_path TEXT,
+                created_at_ms INTEGER,
+                updated_at_ms INTEGER
+            )
+            """
+        )
+        conn.execute("CREATE TABLE thread_dynamic_tools (thread_id TEXT NOT NULL, tool_name TEXT NOT NULL)")
+        conn.execute(
+            """
+            CREATE TABLE thread_spawn_edges (
+                parent_thread_id TEXT NOT NULL,
+                child_thread_id TEXT NOT NULL
+            )
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        logs_db = codex_root / "logs_2.sqlite"
+        conn = sqlite3.connect(logs_db)
+        conn.execute(
+            """
+            CREATE TABLE logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id TEXT NOT NULL,
+                ts INTEGER,
+                level TEXT,
+                message TEXT
+            )
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        return CodexStore(codex_root=codex_root)
+
+    def _rollout_payloads(self, rollout_path: Path) -> list[dict[str, object]]:
+        return [json.loads(line) for line in rollout_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
     def test_rewrite_jsonl_without_filters_matching_rows(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -230,6 +302,38 @@ class CodexJsonlRewriteTests(unittest.TestCase):
 
             self.assertEqual(result.title, f"{DEFAULT_IMPORT_TITLE_PREFIX}Imported Session")
 
+    def test_import_can_override_cwd_and_prefix_title_with_original_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            store = self._create_codex_store(temp_path)
+            session = OpenCodeSession(
+                info={
+                    "id": "ses_override",
+                    "title": "Imported Session",
+                    "directory": "/var/www/project",
+                    "time": {"created": 1000, "updated": 2000},
+                },
+                messages=[
+                    OpenCodeMessage(
+                        info={"id": "msg_1", "role": "user", "time": {"created": 1100}},
+                        parts=[{"type": "text", "text": "hello"}],
+                    )
+                ],
+            )
+
+            result = store.import_opencode_session(session, cwd_override="/home/dreamtcs", dry_run=False)
+            thread = store.resolve_thread(result.thread_id)
+            rollout_payloads = self._rollout_payloads(thread.rollout_path)
+            session_meta = next(item for item in rollout_payloads if item["type"] == "session_meta")
+            turn_context = next(item for item in rollout_payloads if item["type"] == "turn_context")
+
+            self.assertEqual(thread.row["cwd"], "/home/dreamtcs")
+            self.assertEqual(result.title, "opencode /var/www/project Imported Session")
+            self.assertEqual(session_meta["payload"]["cwd"], "/home/dreamtcs")
+            self.assertEqual(session_meta["payload"]["import_meta"]["opencode_directory"], "/var/www/project")
+            self.assertEqual(session_meta["payload"]["import_meta"]["codex_cwd_override"], "/home/dreamtcs")
+            self.assertEqual(turn_context["payload"]["cwd"], "/home/dreamtcs")
+
     def test_import_preserves_opencode_timestamps(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -298,6 +402,68 @@ class CodexJsonlRewriteTests(unittest.TestCase):
             self.assertIsNotNone(row)
             self.assertEqual(row[0], 1000)
             self.assertEqual(row[1], 2000)
+
+    def test_retarget_thread_cwd_rewrites_rollout_and_restores_from_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            store = self._create_codex_store(temp_path)
+            session = OpenCodeSession(
+                info={
+                    "id": "ses_retarget",
+                    "title": "Imported Session",
+                    "directory": "/var/www/project",
+                    "time": {"created": 1000, "updated": 2000},
+                },
+                messages=[
+                    OpenCodeMessage(
+                        info={"id": "msg_1", "role": "user", "time": {"created": 1100}},
+                        parts=[{"type": "text", "text": "hello"}],
+                    )
+                ],
+            )
+            imported = store.import_opencode_session(session, dry_run=False)
+            thread = store.resolve_thread(imported.thread_id)
+
+            result = store.retarget_thread_cwd(thread, new_cwd="/home/dreamtcs", dry_run=False)
+
+            self.assertEqual(result.old_cwd, "/var/www/project")
+            self.assertEqual(result.new_cwd, "/home/dreamtcs")
+            self.assertEqual(result.old_title, "opencode Imported Session")
+            self.assertEqual(result.new_title, "opencode /var/www/project Imported Session")
+            self.assertIsNotNone(result.backup_dir)
+
+            rewritten = store.resolve_thread(imported.thread_id)
+            self.assertEqual(rewritten.row["cwd"], "/home/dreamtcs")
+            self.assertEqual(rewritten.title, "opencode /var/www/project Imported Session")
+
+            rollout_payloads = self._rollout_payloads(rewritten.rollout_path)
+            session_meta = next(item for item in rollout_payloads if item["type"] == "session_meta")
+            turn_context = next(item for item in rollout_payloads if item["type"] == "turn_context")
+            thread_name_event = next(
+                item
+                for item in rollout_payloads
+                if item["type"] == "event_msg" and item["payload"].get("type") == "thread_name_updated"
+            )
+
+            self.assertEqual(session_meta["payload"]["cwd"], "/home/dreamtcs")
+            self.assertEqual(session_meta["payload"]["import_meta"]["opencode_directory"], "/var/www/project")
+            self.assertEqual(session_meta["payload"]["import_meta"]["codex_cwd_override"], "/home/dreamtcs")
+            self.assertEqual(turn_context["payload"]["cwd"], "/home/dreamtcs")
+            self.assertEqual(thread_name_event["payload"]["thread_name"], "opencode /var/www/project Imported Session")
+
+            session_index_lines = (temp_path / ".codex" / "session_index.jsonl").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(session_index_lines), 2)
+            self.assertEqual(
+                [json.loads(line)["thread_name"] for line in session_index_lines],
+                ["opencode Imported Session", "opencode /var/www/project Imported Session"],
+            )
+
+            restored = store.restore_backup(result.backup_dir, force=True)
+            self.assertEqual(restored.thread_id, imported.thread_id)
+
+            reverted = store.resolve_thread(imported.thread_id)
+            self.assertEqual(reverted.row["cwd"], "/var/www/project")
+            self.assertEqual(reverted.title, "opencode Imported Session")
 
 
 class OpenCodeStoreScopeTests(unittest.TestCase):

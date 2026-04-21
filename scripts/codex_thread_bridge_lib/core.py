@@ -44,6 +44,10 @@ def _updated_at_iso(timestamp_ms: int) -> str:
     )
 
 
+def _utc_ms_from_iso(value: str) -> int:
+    return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp() * 1000)
+
+
 def _local_rollout_path(codex_root: Path, created_ms: int, thread_id: str) -> Path:
     local_dt = datetime.fromtimestamp(created_ms / 1000).astimezone()
     day_dir = codex_root / "sessions" / local_dt.strftime("%Y") / local_dt.strftime("%m") / local_dt.strftime("%d")
@@ -53,6 +57,12 @@ def _local_rollout_path(codex_root: Path, created_ms: int, thread_id: str) -> Pa
 
 def _compact_json(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+
+def _default_import_title(title_prefix: str, session_title: str, *, original_cwd: str | None = None) -> str:
+    if original_cwd:
+        return f"{title_prefix}{original_cwd} {session_title}".strip()
+    return f"{title_prefix}{session_title}".strip()
 
 
 def _truncate(text: str, max_chars: int) -> str:
@@ -276,6 +286,26 @@ class CodexSearchMatch:
 
 
 @dataclass(slots=True)
+class CodexRetargetResult:
+    thread_id: str
+    old_title: str
+    new_title: str
+    old_cwd: str
+    new_cwd: str
+    backup_dir: Path | None
+    dry_run: bool
+
+
+@dataclass(slots=True)
+class CodexRepairResult:
+    thread_id: str
+    title: str
+    backup_dir: Path | None
+    inserted_task_complete_events: int
+    dry_run: bool
+
+
+@dataclass(slots=True)
 class OpenCodeSearchMatch:
     session_id: str
     title: str
@@ -326,6 +356,18 @@ def _string_matches(
     if contains is not None and contains not in candidate:
         return False
     return prefix is not None or contains is not None
+
+
+def _retargeted_opencode_title(current_title: str, original_cwd: str) -> str:
+    if not original_cwd:
+        return current_title
+    base_title = current_title
+    if base_title.startswith(DEFAULT_IMPORT_TITLE_PREFIX):
+        base_title = base_title[len(DEFAULT_IMPORT_TITLE_PREFIX) :]
+    cwd_prefix = f"{original_cwd} "
+    if base_title.startswith(cwd_prefix):
+        base_title = base_title[len(cwd_prefix) :]
+    return f"{DEFAULT_IMPORT_TITLE_PREFIX}{original_cwd} {base_title}".strip()
 
 
 class OpenCodeStore:
@@ -956,13 +998,19 @@ class CodexStore:
         *,
         title_prefix: str = DEFAULT_IMPORT_TITLE_PREFIX,
         title_override: str | None = None,
+        cwd_override: str | None = None,
         include_tools: bool = True,
         include_reasoning: bool = False,
         tool_output_max_chars: int = 1200,
         dry_run: bool = False,
     ) -> ImportResult:
         thread_id = str(uuid.uuid4())
-        title = title_override or f"{title_prefix}{session.title}"
+        target_cwd = cwd_override or session.directory
+        if title_override is not None:
+            title = title_override
+        else:
+            original_cwd = session.directory if target_cwd != session.directory else None
+            title = _default_import_title(title_prefix, session.title, original_cwd=original_cwd)
         created_ms = session.created_ms or int(datetime.now(tz=timezone.utc).timestamp() * 1000)
         updated_ms = session.updated_ms or created_ms
         rollout_path = _local_rollout_path(self.codex_root, created_ms, thread_id)
@@ -991,7 +1039,7 @@ class CodexStore:
             "updated_at": updated_ms // 1000,
             "source": defaults["source"],
             "model_provider": defaults["model_provider"],
-            "cwd": session.directory,
+            "cwd": target_cwd,
             "title": title,
             "sandbox_policy": defaults["sandbox_policy"],
             "approval_mode": defaults["approval_mode"],
@@ -1026,6 +1074,7 @@ class CodexStore:
             rendered_messages=rendered_messages,
             created_ms=created_ms,
             title=title,
+            target_cwd=target_cwd,
         )
 
         session_index_line = _compact_json(
@@ -1078,13 +1127,14 @@ class CodexStore:
         rendered_messages: list[tuple[OpenCodeMessage, str]],
         created_ms: int,
         title: str,
+        target_cwd: str,
     ) -> list[str]:
         templates = self._latest_rollout_templates()
         defaults = self._thread_defaults()
         session_meta = copy.deepcopy(templates["session_meta"])
         session_meta["id"] = thread_id
         session_meta["timestamp"] = _utc_iso_from_ms(created_ms)
-        session_meta["cwd"] = session.directory
+        session_meta["cwd"] = target_cwd
         session_meta["source"] = defaults["source"]
         session_meta["model_provider"] = defaults["model_provider"]
         session_meta["import_meta"] = {
@@ -1092,7 +1142,10 @@ class CodexStore:
             "source": "opencode",
             "opencode_session_id": session.id,
             "opencode_title": session.title,
+            "opencode_directory": session.directory,
         }
+        if target_cwd != session.directory:
+            session_meta["import_meta"]["codex_cwd_override"] = target_cwd
 
         lines: list[str] = [
             _compact_json(
@@ -1147,7 +1200,7 @@ class CodexStore:
             task_started["started_at"] = started_ms // 1000
             turn_context = copy.deepcopy(templates["turn_context"])
             turn_context["turn_id"] = turn_id
-            turn_context["cwd"] = session.directory
+            turn_context["cwd"] = target_cwd
             turn_context["current_date"] = datetime.fromtimestamp(started_ms / 1000).astimezone().date().isoformat()
 
             user_text = render_opencode_message(user_message, include_tools=False, include_reasoning=False).strip()
@@ -1230,6 +1283,84 @@ class CodexStore:
                 )
 
         return lines
+
+    def retarget_thread_cwd(
+        self,
+        thread: CodexThread,
+        *,
+        new_cwd: str,
+        backup_root: Path | None = None,
+        create_backup: bool = True,
+        dry_run: bool = False,
+        allow_current_thread: bool = False,
+    ) -> CodexRetargetResult:
+        import_meta = self._thread_import_meta(thread)
+        source = str(import_meta.get("source") or "")
+        if source and source != "opencode":
+            raise BridgeError(
+                f"Codex thread '{thread.id}' is not an imported OpenCode thread and cannot be retargeted safely."
+            )
+
+        old_cwd = str(thread.row.get("cwd") or "")
+        original_cwd = str(import_meta.get("opencode_directory") or old_cwd)
+        new_title = _retargeted_opencode_title(thread.title, original_cwd)
+        if not new_cwd:
+            raise BridgeError("A non-empty target CWD is required.")
+
+        if new_cwd == old_cwd and new_title == thread.title:
+            return CodexRetargetResult(
+                thread_id=thread.id,
+                old_title=thread.title,
+                new_title=new_title,
+                old_cwd=old_cwd,
+                new_cwd=new_cwd,
+                backup_dir=None,
+                dry_run=dry_run,
+            )
+
+        backup_dir: Path | None = None
+        if not dry_run and create_backup:
+            backup = self.delete_thread(
+                thread,
+                backup_root=backup_root,
+                create_backup=True,
+                dry_run=True,
+                allow_current_thread=allow_current_thread,
+            )
+            backup_dir = backup.backup_dir
+
+        if not dry_run:
+            with self._state_conn() as conn:
+                conn.execute("UPDATE threads SET cwd = ?, title = ? WHERE id = ?", (new_cwd, new_title, thread.id))
+                conn.commit()
+
+            renamed_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+            self._append_jsonl_line(
+                self.session_index_path,
+                _compact_json(
+                    {
+                        "id": thread.id,
+                        "thread_name": new_title,
+                        "updated_at": _updated_at_iso(renamed_ms),
+                    }
+                ),
+            )
+            self._rewrite_rollout_for_retarget(
+                thread.rollout_path,
+                new_title=new_title,
+                new_cwd=new_cwd,
+                original_cwd=original_cwd,
+            )
+
+        return CodexRetargetResult(
+            thread_id=thread.id,
+            old_title=thread.title,
+            new_title=new_title,
+            old_cwd=old_cwd,
+            new_cwd=new_cwd,
+            backup_dir=backup_dir,
+            dry_run=dry_run,
+        )
 
     def delete_thread(
         self,
@@ -1437,6 +1568,67 @@ class CodexStore:
                     matches.append(line)
         return matches
 
+    def _thread_import_meta(self, thread: CodexThread) -> dict[str, Any]:
+        if not thread.rollout_path.exists():
+            return {}
+        with thread.rollout_path.open(encoding="utf-8") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                payload = json.loads(line)
+                if payload.get("type") != "session_meta":
+                    continue
+                session_meta = payload.get("payload") or {}
+                import_meta = session_meta.get("import_meta")
+                if isinstance(import_meta, dict):
+                    return dict(import_meta)
+                return {}
+        return {}
+
+    def _rewrite_rollout_for_retarget(
+        self,
+        rollout_path: Path,
+        *,
+        new_title: str,
+        new_cwd: str,
+        original_cwd: str,
+    ) -> None:
+        if not rollout_path.exists():
+            return
+
+        rewritten: list[str] = []
+        with rollout_path.open(encoding="utf-8") as handle:
+            for raw_line in handle:
+                line = raw_line.rstrip("\n")
+                if not line.strip():
+                    continue
+                payload = json.loads(line)
+                item_type = payload.get("type")
+                inner = payload.get("payload")
+                if isinstance(inner, dict):
+                    if item_type == "session_meta":
+                        inner["cwd"] = new_cwd
+                        import_meta = inner.get("import_meta")
+                        if not isinstance(import_meta, dict):
+                            import_meta = {}
+                        import_meta.setdefault("bridge", "codex-thread-bridge")
+                        import_meta["source"] = "opencode"
+                        if original_cwd:
+                            import_meta["opencode_directory"] = original_cwd
+                        if new_cwd != original_cwd:
+                            import_meta["codex_cwd_override"] = new_cwd
+                        else:
+                            import_meta.pop("codex_cwd_override", None)
+                        inner["import_meta"] = import_meta
+                    elif item_type == "turn_context":
+                        inner["cwd"] = new_cwd
+                    elif item_type == "event_msg" and inner.get("type") == "thread_name_updated":
+                        inner["thread_name"] = new_title
+                rewritten.append(_compact_json(payload))
+
+        rollout_path.write_text("".join(line + "\n" for line in rewritten), encoding="utf-8")
+
     def _rewrite_jsonl_without(self, path: Path, key: str, value: str) -> None:
         if not path.exists():
             return
@@ -1450,6 +1642,15 @@ class CodexStore:
                 if payload.get(key) != value:
                     kept.append(line)
         path.write_text("".join(line + "\n" for line in kept), encoding="utf-8")
+
+    def _append_jsonl_line(self, path: Path, line: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            existing = {existing_line for existing_line in path.read_text(encoding="utf-8").splitlines() if existing_line}
+            if line in existing:
+                return
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
 
     def _append_unique_lines(self, target_path: Path, source_path: Path) -> None:
         existing = set()

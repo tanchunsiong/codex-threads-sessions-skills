@@ -53,6 +53,11 @@ def _build_parser() -> argparse.ArgumentParser:
     import_parser.add_argument("--dry-run", action="store_true")
     import_parser.add_argument("--title-prefix", default=DEFAULT_IMPORT_TITLE_PREFIX)
     import_parser.add_argument("--title")
+    import_parser.add_argument(
+        "--cwd-override",
+        type=Path,
+        help="Import into this Codex working directory instead of the original OpenCode directory.",
+    )
     import_parser.add_argument("--skip-tools", action="store_true")
     import_parser.add_argument("--include-reasoning", action="store_true")
     import_parser.add_argument("--tool-output-max-chars", type=int, default=1200)
@@ -85,6 +90,19 @@ def _build_parser() -> argparse.ArgumentParser:
     delete_parser.add_argument("--no-backup", action="store_true", help="Skip backup creation before deletion.")
     delete_parser.add_argument("--backup-root", type=Path)
     delete_parser.add_argument("--allow-current-thread", action="store_true")
+
+    retarget_parser = subparsers.add_parser("retarget-codex-cwd")
+    retarget_parser.add_argument("refs", nargs="*", help="Codex thread IDs or exact titles.")
+    retarget_parser.add_argument("--contains", action="store_true", help="Allow a unique title substring match.")
+    retarget_parser.add_argument("--title-prefix")
+    retarget_parser.add_argument("--title-contains")
+    retarget_parser.add_argument("--include-session-index", action="store_true")
+    retarget_parser.add_argument("--case-sensitive", action="store_true")
+    retarget_parser.add_argument("--cwd", type=Path, required=True, help="New working directory for the matched threads.")
+    retarget_parser.add_argument("--dry-run", action="store_true")
+    retarget_parser.add_argument("--no-backup", action="store_true", help="Skip backup creation before rewriting.")
+    retarget_parser.add_argument("--backup-root", type=Path)
+    retarget_parser.add_argument("--allow-current-thread", action="store_true")
 
     restore_parser = subparsers.add_parser("restore-codex")
     restore_parser.add_argument("backup_dir", type=Path)
@@ -247,6 +265,7 @@ def _unique_opencode_sessions_for_delete(
 def _handle_import(args: argparse.Namespace) -> int:
     opencode = OpenCodeStore()
     codex = CodexStore()
+    cwd_override = str(args.cwd_override.expanduser().resolve()) if args.cwd_override else None
     for index, ref in enumerate(args.refs):
         session = opencode.resolve_session(
             ref,
@@ -257,6 +276,7 @@ def _handle_import(args: argparse.Namespace) -> int:
             session,
             title_prefix=args.title_prefix,
             title_override=args.title if len(args.refs) == 1 else None,
+            cwd_override=cwd_override,
             include_tools=not args.skip_tools,
             include_reasoning=args.include_reasoning,
             tool_output_max_chars=args.tool_output_max_chars,
@@ -376,6 +396,55 @@ def _handle_delete(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_retarget(args: argparse.Namespace) -> int:
+    if not args.refs and not args.title_prefix and not args.title_contains:
+        raise BridgeError("retarget-codex-cwd requires explicit refs or a search filter.")
+
+    codex = CodexStore()
+    threads = []
+    if args.refs:
+        threads = [codex.resolve_thread(ref, contains=args.contains) for ref in args.refs]
+    else:
+        matches = codex.search_threads(
+            title_prefix=args.title_prefix,
+            title_contains=args.title_contains,
+            include_session_index=args.include_session_index,
+            ignore_case=not args.case_sensitive,
+        )
+        threads = [codex.resolve_thread(match.thread_id) for match in matches]
+        if not threads:
+            print("No rows found.")
+            return 0
+
+    unique_threads = []
+    seen_thread_ids = set()
+    for thread in threads:
+        if thread.id in seen_thread_ids:
+            continue
+        seen_thread_ids.add(thread.id)
+        unique_threads.append(thread)
+
+    new_cwd = str(args.cwd.expanduser().resolve())
+    for index, thread in enumerate(unique_threads):
+        result = codex.retarget_thread_cwd(
+            thread,
+            new_cwd=new_cwd,
+            backup_root=args.backup_root,
+            create_backup=not args.no_backup,
+            dry_run=args.dry_run,
+            allow_current_thread=args.allow_current_thread,
+        )
+        prefix = "DRY RUN" if result.dry_run else "RETARGETED"
+        backup_text = str(result.backup_dir) if result.backup_dir is not None else "disabled"
+        print(
+            f"{prefix}: {result.thread_id}  old_cwd={result.old_cwd!r}  new_cwd={result.new_cwd!r}  "
+            f"old_title={result.old_title!r}  new_title={result.new_title!r}  backup={backup_text}"
+        )
+        if index + 1 < len(unique_threads):
+            print()
+    return 0
+
+
 def _handle_restore(args: argparse.Namespace) -> int:
     codex = CodexStore()
     result = codex.restore_backup(args.backup_dir, force=args.force)
@@ -415,6 +484,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _handle_delete_opencode(args)
         if args.command == "delete-codex":
             return _handle_delete(args)
+        if args.command == "retarget-codex-cwd":
+            return _handle_retarget(args)
         if args.command == "restore-opencode":
             return _handle_restore_opencode(args)
         if args.command == "restore-codex":
