@@ -1,9 +1,9 @@
 ---
-name: opencode-codex-threads
-description: Use when you need to inspect OpenCode sessions, import them into local Codex threads, or delete and restore local Codex threads through the thread bridge CLI.
+name: codex-threads-sessions-skills
+description: Use when you need to inspect OpenCode sessions, import them into local Codex threads, or search, delete, and restore local Codex threads through the bundled thread bridge CLI.
 ---
 
-# OpenCode/Codex Thread Bridge
+# Codex Threads-Sessions Skills
 
 Use the bundled CLI at `scripts/codex_thread_bridge.py`.
 

@@ -1,4 +1,4 @@
-# OpenCode Codex Threads Skill
+# Codex Threads-Sessions Skills
 
 This repository packages a Codex skill plus a bundled Python bridge for:
 
@@ -21,7 +21,7 @@ This repository packages a Codex skill plus a bundled Python bridge for:
 Clone this repository directly into your Codex skills directory:
 
 ```bash
-git clone https://github.com/tanchunsiong/opencode-codex-threads-skill.git ~/.codex/skills/opencode-codex-threads
+git clone https://github.com/tanchunsiong/codex-threads-sessions-skills.git ~/.codex/skills/codex-threads-sessions-skills
 ```
 
 If you already cloned it elsewhere, copy the repository contents into a folder under `~/.codex/skills/` and keep `SKILL.md` at the folder root.
