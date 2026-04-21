@@ -38,6 +38,7 @@ Use the bundled CLI at `scripts/codex_thread_bridge.py`.
 ## Notes
 
 - `search-opencode`, `delete-opencode`, `list-opencode`, and `import-opencode` default to top-level OpenCode sessions only, which matches the smaller visible set in OpenCode. Add `--all-sessions` to include child/subagent sessions.
+- Imported Codex threads use the current import time for their Codex timestamps so newly imported OpenCode sessions rise to the top of the Codex list.
 - OpenCode deletion backs up the session subtree under `~/.local/share/opencode/thread-bridge-backups/` unless `--no-backup` is passed.
 - `restore-opencode` rebuilds both the local OpenCode SQLite state and the mirrored storage files from backup.
 - `delete-codex` refuses to remove the current live thread unless `--allow-current-thread` is passed.

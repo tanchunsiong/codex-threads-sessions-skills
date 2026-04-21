@@ -963,8 +963,11 @@ class CodexStore:
     ) -> ImportResult:
         thread_id = str(uuid.uuid4())
         title = title_override or f"{title_prefix}{session.title}"
-        created_ms = session.created_ms or int(datetime.now(tz=timezone.utc).timestamp() * 1000)
-        updated_ms = session.updated_ms or created_ms
+        source_created_ms = session.created_ms or int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+        source_updated_ms = session.updated_ms or source_created_ms
+        imported_at_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+        created_ms = imported_at_ms
+        updated_ms = imported_at_ms
         rollout_path = _local_rollout_path(self.codex_root, created_ms, thread_id)
 
         rendered_messages: list[tuple[OpenCodeMessage, str]] = []
@@ -1026,6 +1029,9 @@ class CodexStore:
             rendered_messages=rendered_messages,
             created_ms=created_ms,
             title=title,
+            source_created_ms=source_created_ms,
+            source_updated_ms=source_updated_ms,
+            imported_at_ms=imported_at_ms,
         )
 
         session_index_line = _compact_json(
@@ -1078,6 +1084,9 @@ class CodexStore:
         rendered_messages: list[tuple[OpenCodeMessage, str]],
         created_ms: int,
         title: str,
+        source_created_ms: int,
+        source_updated_ms: int,
+        imported_at_ms: int,
     ) -> list[str]:
         templates = self._latest_rollout_templates()
         defaults = self._thread_defaults()
@@ -1092,6 +1101,9 @@ class CodexStore:
             "source": "opencode",
             "opencode_session_id": session.id,
             "opencode_title": session.title,
+            "opencode_created_ms": source_created_ms,
+            "opencode_updated_ms": source_updated_ms,
+            "imported_at_ms": imported_at_ms,
         }
 
         lines: list[str] = [

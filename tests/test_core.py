@@ -5,6 +5,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -229,6 +230,81 @@ class CodexJsonlRewriteTests(unittest.TestCase):
             result = store.import_opencode_session(session, dry_run=True)
 
             self.assertEqual(result.title, f"{DEFAULT_IMPORT_TITLE_PREFIX}Imported Session")
+
+    def test_import_uses_current_codex_timestamps(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            codex_root = temp_path / ".codex"
+            codex_root.mkdir()
+
+            state_db = codex_root / "state_5.sqlite"
+            conn = sqlite3.connect(state_db)
+            conn.execute(
+                """
+                CREATE TABLE threads (
+                    id TEXT PRIMARY KEY,
+                    rollout_path TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    source TEXT NOT NULL,
+                    model_provider TEXT NOT NULL,
+                    cwd TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    sandbox_policy TEXT NOT NULL,
+                    approval_mode TEXT NOT NULL,
+                    tokens_used INTEGER NOT NULL DEFAULT 0,
+                    has_user_event INTEGER NOT NULL DEFAULT 0,
+                    archived INTEGER NOT NULL DEFAULT 0,
+                    archived_at INTEGER,
+                    git_sha TEXT,
+                    git_branch TEXT,
+                    git_origin_url TEXT,
+                    cli_version TEXT NOT NULL DEFAULT '',
+                    first_user_message TEXT NOT NULL DEFAULT '',
+                    agent_nickname TEXT,
+                    agent_role TEXT,
+                    memory_mode TEXT NOT NULL DEFAULT 'enabled',
+                    model TEXT,
+                    reasoning_effort TEXT,
+                    agent_path TEXT,
+                    created_at_ms INTEGER,
+                    updated_at_ms INTEGER
+                )
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            (codex_root / "logs_2.sqlite").write_bytes(b"")
+            session = OpenCodeSession(
+                info={
+                    "id": "ses_old",
+                    "title": "Old Session",
+                    "directory": "/tmp",
+                    "time": {"created": 1000, "updated": 2000},
+                },
+                messages=[],
+            )
+
+            before_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+            store = CodexStore(codex_root=codex_root)
+            result = store.import_opencode_session(session, dry_run=False)
+            after_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+
+            conn = sqlite3.connect(state_db)
+            row = conn.execute(
+                "SELECT created_at_ms, updated_at_ms FROM threads WHERE id = ?",
+                (result.thread_id,),
+            ).fetchone()
+            conn.close()
+
+            self.assertIsNotNone(row)
+            self.assertGreaterEqual(row[0], before_ms)
+            self.assertLessEqual(row[0], after_ms)
+            self.assertGreaterEqual(row[1], before_ms)
+            self.assertLessEqual(row[1], after_ms)
+            self.assertNotEqual(row[0], 1000)
+            self.assertNotEqual(row[1], 2000)
 
 
 class OpenCodeStoreScopeTests(unittest.TestCase):
