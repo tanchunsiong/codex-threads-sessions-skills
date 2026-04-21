@@ -19,6 +19,12 @@ def _build_parser() -> argparse.ArgumentParser:
         subparser = subparsers.add_parser(name)
         subparser.add_argument("--limit", type=int, default=20)
         subparser.add_argument("--json", action="store_true", dest="as_json")
+        if name == "list-opencode":
+            subparser.add_argument(
+                "--all-sessions",
+                action="store_true",
+                help="Include child/subagent OpenCode sessions as well as top-level sessions.",
+            )
 
     search_parser = subparsers.add_parser("search-codex")
     search_parser.add_argument("--title-prefix")
@@ -31,6 +37,11 @@ def _build_parser() -> argparse.ArgumentParser:
     import_parser = subparsers.add_parser("import-opencode")
     import_parser.add_argument("refs", nargs="+", help="OpenCode session IDs or exact titles.")
     import_parser.add_argument("--contains", action="store_true", help="Allow a unique title substring match.")
+    import_parser.add_argument(
+        "--all-sessions",
+        action="store_true",
+        help="Allow importing child/subagent OpenCode sessions too. By default only top-level sessions are matched.",
+    )
     import_parser.add_argument("--dry-run", action="store_true")
     import_parser.add_argument("--title-prefix", default=DEFAULT_IMPORT_TITLE_PREFIX)
     import_parser.add_argument("--title")
@@ -78,15 +89,17 @@ def _print_rows(rows: list[dict[str, object]], *, limit: int) -> None:
 
 def _handle_list_opencode(args: argparse.Namespace) -> int:
     store = OpenCodeStore()
-    rows = [
-        {
+    rows = []
+    for session in store.list_sessions(include_child_sessions=args.all_sessions):
+        row = {
             "id": session.id,
             "updated": session.updated_ms,
             "title": session.title,
             "directory": session.directory,
         }
-        for session in store.list_sessions()
-    ]
+        if args.all_sessions:
+            row["parent_id"] = session.parent_id or ""
+        rows.append(row)
     if args.as_json:
         print(json.dumps(rows[: args.limit], indent=2, ensure_ascii=True))
     else:
@@ -147,7 +160,11 @@ def _handle_import(args: argparse.Namespace) -> int:
     opencode = OpenCodeStore()
     codex = CodexStore()
     for index, ref in enumerate(args.refs):
-        session = opencode.resolve_session(ref, contains=args.contains)
+        session = opencode.resolve_session(
+            ref,
+            contains=args.contains,
+            include_child_sessions=args.all_sessions,
+        )
         result = codex.import_opencode_session(
             session,
             title_prefix=args.title_prefix,

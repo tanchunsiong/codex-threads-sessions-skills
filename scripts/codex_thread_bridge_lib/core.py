@@ -185,6 +185,19 @@ class OpenCodeSession:
         return str(self.info.get("title") or self.info.get("slug") or self.id)
 
     @property
+    def parent_id(self) -> str | None:
+        parent_id = self.info.get("parentID")
+        if parent_id is None:
+            parent_id = self.info.get("parent_id")
+        if parent_id in {None, ""}:
+            return None
+        return str(parent_id)
+
+    @property
+    def is_root(self) -> bool:
+        return self.parent_id is None
+
+    @property
     def directory(self) -> str:
         return str(self.info.get("directory") or Path.home())
 
@@ -292,19 +305,27 @@ class OpenCodeStore:
         self.message_root = self.storage_root / "message"
         self.part_root = self.storage_root / "part"
 
-    def list_sessions(self) -> list[OpenCodeSession]:
+    def list_sessions(self, *, include_child_sessions: bool = False) -> list[OpenCodeSession]:
         sessions: dict[str, OpenCodeSession] = {}
         if not self.session_root.exists():
             return []
         for path in sorted(self.session_root.rglob("ses_*.json")):
             info = _json_load(path)
             session = OpenCodeSession(info=info, messages=[])
+            if not include_child_sessions and not session.is_root:
+                continue
             sessions[session.id] = session
         ordered = sorted(sessions.values(), key=lambda item: item.updated_ms, reverse=True)
         return ordered
 
-    def resolve_session(self, ref: str, *, contains: bool = False) -> OpenCodeSession:
-        sessions = self.list_sessions()
+    def resolve_session(
+        self,
+        ref: str,
+        *,
+        contains: bool = False,
+        include_child_sessions: bool = False,
+    ) -> OpenCodeSession:
+        sessions = self.list_sessions(include_child_sessions=include_child_sessions)
         exact_id = [session for session in sessions if session.id == ref]
         if exact_id:
             return self.load_session(exact_id[0].id)
@@ -321,6 +342,44 @@ class OpenCodeStore:
                 return self.load_session(matches[0].id)
             if len(matches) > 1:
                 raise BridgeError(f"OpenCode reference '{ref}' matched multiple session titles.")
+
+        if not include_child_sessions:
+            child_sessions = self.list_sessions(include_child_sessions=True)
+            child_by_id = [session for session in child_sessions if session.id == ref and not session.is_root]
+            if child_by_id:
+                raise BridgeError(
+                    f"OpenCode session '{ref}' is a child/subagent session. Re-run with --all-sessions "
+                    "to include child sessions."
+                )
+
+            child_by_title = [session for session in child_sessions if session.title == ref and not session.is_root]
+            if len(child_by_title) == 1:
+                raise BridgeError(
+                    f"OpenCode session '{ref}' is a child/subagent session. Re-run with --all-sessions "
+                    "to include child sessions."
+                )
+            if len(child_by_title) > 1:
+                raise BridgeError(
+                    f"OpenCode reference '{ref}' matched multiple child/subagent sessions. Re-run with "
+                    "--all-sessions to include child sessions."
+                )
+
+            if contains:
+                child_contains = [
+                    session
+                    for session in child_sessions
+                    if not session.is_root and ref.lower() in session.title.lower()
+                ]
+                if len(child_contains) == 1:
+                    raise BridgeError(
+                        f"OpenCode session '{ref}' matched only a child/subagent session. Re-run with "
+                        "--all-sessions to include child sessions."
+                    )
+                if len(child_contains) > 1:
+                    raise BridgeError(
+                        f"OpenCode reference '{ref}' matched multiple child/subagent sessions. Re-run with "
+                        "--all-sessions to include child sessions."
+                    )
 
         raise BridgeError(f"OpenCode session '{ref}' was not found.")
 

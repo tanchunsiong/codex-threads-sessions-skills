@@ -32,14 +32,17 @@ Run commands from the repository root:
 
 ```bash
 python3 scripts/codex_thread_bridge.py list-opencode --limit 20
+python3 scripts/codex_thread_bridge.py list-opencode --all-sessions --limit 20
 python3 scripts/codex_thread_bridge.py list-codex --limit 20
 python3 scripts/codex_thread_bridge.py search-codex --title-prefix TBD --include-session-index
 python3 scripts/codex_thread_bridge.py import-opencode <session-id> --dry-run
+python3 scripts/codex_thread_bridge.py import-opencode <session-id> --all-sessions --dry-run
 python3 scripts/codex_thread_bridge.py delete-codex <thread-id> --dry-run
 python3 scripts/codex_thread_bridge.py restore-codex <backup-dir>
 ```
 
 Imported OpenCode sessions default to a Codex title of `opencode <original title>`. Use `--title-prefix` or `--title` if you need a different naming scheme.
+By default, OpenCode listing and import only consider top-level sessions, which matches the smaller set shown in OpenCode. Add `--all-sessions` if you want child/subagent sessions too.
 
 ## Safety
 

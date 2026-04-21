@@ -13,7 +13,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from codex_thread_bridge_lib.core import (
     CodexStore,
     DEFAULT_IMPORT_TITLE_PREFIX,
+    BridgeError,
     OpenCodeMessage,
+    OpenCodeStore,
     OpenCodeSession,
     render_opencode_message,
 )
@@ -227,6 +229,82 @@ class CodexJsonlRewriteTests(unittest.TestCase):
             result = store.import_opencode_session(session, dry_run=True)
 
             self.assertEqual(result.title, f"{DEFAULT_IMPORT_TITLE_PREFIX}Imported Session")
+
+
+class OpenCodeStoreScopeTests(unittest.TestCase):
+    def test_list_sessions_defaults_to_root_sessions_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_root = Path(temp_dir)
+            session_root = storage_root / "session"
+            session_root.mkdir(parents=True)
+
+            (session_root / "ses_root.json").write_text(
+                json.dumps(
+                    {
+                        "id": "ses_root",
+                        "title": "Root Session",
+                        "parentID": None,
+                        "time": {"created": 1000, "updated": 2000},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (session_root / "ses_child.json").write_text(
+                json.dumps(
+                    {
+                        "id": "ses_child",
+                        "title": "Child Session",
+                        "parentID": "ses_root",
+                        "time": {"created": 1500, "updated": 2500},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            store = OpenCodeStore(storage_root=storage_root)
+
+            self.assertEqual([session.id for session in store.list_sessions()], ["ses_root"])
+            self.assertEqual(
+                [session.id for session in store.list_sessions(include_child_sessions=True)],
+                ["ses_child", "ses_root"],
+            )
+
+    def test_resolve_session_requires_all_sessions_for_child_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_root = Path(temp_dir)
+            session_root = storage_root / "session"
+            session_root.mkdir(parents=True)
+
+            (session_root / "ses_root.json").write_text(
+                json.dumps(
+                    {
+                        "id": "ses_root",
+                        "title": "Root Session",
+                        "parentID": None,
+                        "time": {"created": 1000, "updated": 2000},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (session_root / "ses_child.json").write_text(
+                json.dumps(
+                    {
+                        "id": "ses_child",
+                        "title": "Child Session",
+                        "parentID": "ses_root",
+                        "time": {"created": 1500, "updated": 2500},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            store = OpenCodeStore(storage_root=storage_root)
+
+            with self.assertRaisesRegex(BridgeError, "--all-sessions"):
+                store.resolve_session("ses_child")
+
+            session = store.resolve_session("ses_child", include_child_sessions=True)
+            self.assertEqual(session.id, "ses_child")
 
 
 if __name__ == "__main__":
