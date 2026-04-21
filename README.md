@@ -39,6 +39,8 @@ python3 scripts/codex_thread_bridge.py delete-codex <thread-id> --dry-run
 python3 scripts/codex_thread_bridge.py restore-codex <backup-dir>
 ```
 
+Imported OpenCode sessions default to a Codex title of `opencode <original title>`. Use `--title-prefix` or `--title` if you need a different naming scheme.
+
 ## Safety
 
 - `delete-codex` requires `--yes` for real deletion.

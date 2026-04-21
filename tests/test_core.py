@@ -10,7 +10,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from codex_thread_bridge_lib.core import CodexStore, OpenCodeMessage, render_opencode_message
+from codex_thread_bridge_lib.core import (
+    CodexStore,
+    DEFAULT_IMPORT_TITLE_PREFIX,
+    OpenCodeMessage,
+    OpenCodeSession,
+    render_opencode_message,
+)
 
 
 class RenderOpenCodeMessageTests(unittest.TestCase):
@@ -161,6 +167,66 @@ class CodexJsonlRewriteTests(unittest.TestCase):
             self.assertEqual(len(matches), 1)
             self.assertEqual(matches[0].thread_id, "thread-1")
             self.assertIn("TBD: Old title", matches[0].matched_titles)
+
+    def test_import_uses_opencode_prefix_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            codex_root = temp_path / ".codex"
+            codex_root.mkdir()
+
+            state_db = codex_root / "state_5.sqlite"
+            conn = sqlite3.connect(state_db)
+            conn.execute(
+                """
+                CREATE TABLE threads (
+                    id TEXT PRIMARY KEY,
+                    rollout_path TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    source TEXT NOT NULL,
+                    model_provider TEXT NOT NULL,
+                    cwd TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    sandbox_policy TEXT NOT NULL,
+                    approval_mode TEXT NOT NULL,
+                    tokens_used INTEGER NOT NULL DEFAULT 0,
+                    has_user_event INTEGER NOT NULL DEFAULT 0,
+                    archived INTEGER NOT NULL DEFAULT 0,
+                    archived_at INTEGER,
+                    git_sha TEXT,
+                    git_branch TEXT,
+                    git_origin_url TEXT,
+                    cli_version TEXT NOT NULL DEFAULT '',
+                    first_user_message TEXT NOT NULL DEFAULT '',
+                    agent_nickname TEXT,
+                    agent_role TEXT,
+                    memory_mode TEXT NOT NULL DEFAULT 'enabled',
+                    model TEXT,
+                    reasoning_effort TEXT,
+                    agent_path TEXT,
+                    created_at_ms INTEGER,
+                    updated_at_ms INTEGER
+                )
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            (codex_root / "logs_2.sqlite").write_bytes(b"")
+            session = OpenCodeSession(
+                info={
+                    "id": "ses_test",
+                    "title": "Imported Session",
+                    "directory": "/tmp",
+                    "time": {"created": 1000, "updated": 2000},
+                },
+                messages=[],
+            )
+
+            store = CodexStore(codex_root=codex_root)
+            result = store.import_opencode_session(session, dry_run=True)
+
+            self.assertEqual(result.title, f"{DEFAULT_IMPORT_TITLE_PREFIX}Imported Session")
 
 
 if __name__ == "__main__":

@@ -16,6 +16,9 @@ class BridgeError(RuntimeError):
     """Raised when the bridge cannot safely complete a request."""
 
 
+DEFAULT_IMPORT_TITLE_PREFIX = "opencode "
+
+
 def _json_load(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -562,7 +565,7 @@ class CodexStore:
         self,
         session: OpenCodeSession,
         *,
-        title_prefix: str = "",
+        title_prefix: str = DEFAULT_IMPORT_TITLE_PREFIX,
         title_override: str | None = None,
         include_tools: bool = True,
         include_reasoning: bool = False,

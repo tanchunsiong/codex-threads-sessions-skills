@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Sequence
 
-from .core import BridgeError, CodexStore, OpenCodeStore
+from .core import BridgeError, CodexStore, DEFAULT_IMPORT_TITLE_PREFIX, OpenCodeStore
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -32,7 +32,7 @@ def _build_parser() -> argparse.ArgumentParser:
     import_parser.add_argument("refs", nargs="+", help="OpenCode session IDs or exact titles.")
     import_parser.add_argument("--contains", action="store_true", help="Allow a unique title substring match.")
     import_parser.add_argument("--dry-run", action="store_true")
-    import_parser.add_argument("--title-prefix", default="")
+    import_parser.add_argument("--title-prefix", default=DEFAULT_IMPORT_TITLE_PREFIX)
     import_parser.add_argument("--title")
     import_parser.add_argument("--skip-tools", action="store_true")
     import_parser.add_argument("--include-reasoning", action="store_true")
