@@ -11,7 +11,7 @@ from .core import BridgeError, CodexStore, DEFAULT_IMPORT_TITLE_PREFIX, OpenCode
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="codex-thread-bridge",
-        description="List OpenCode sessions, import them into local Codex state, and delete or restore Codex threads.",
+        description="List, search, import, delete, and restore OpenCode sessions and local Codex threads.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -25,6 +25,14 @@ def _build_parser() -> argparse.ArgumentParser:
                 action="store_true",
                 help="Include child/subagent OpenCode sessions as well as top-level sessions.",
             )
+
+    search_opencode_parser = subparsers.add_parser("search-opencode")
+    search_opencode_parser.add_argument("--title-prefix")
+    search_opencode_parser.add_argument("--title-contains")
+    search_opencode_parser.add_argument("--all-sessions", action="store_true")
+    search_opencode_parser.add_argument("--case-sensitive", action="store_true")
+    search_opencode_parser.add_argument("--limit", type=int, default=20)
+    search_opencode_parser.add_argument("--json", action="store_true", dest="as_json")
 
     search_parser = subparsers.add_parser("search-codex")
     search_parser.add_argument("--title-prefix")
@@ -49,6 +57,22 @@ def _build_parser() -> argparse.ArgumentParser:
     import_parser.add_argument("--include-reasoning", action="store_true")
     import_parser.add_argument("--tool-output-max-chars", type=int, default=1200)
 
+    delete_opencode_parser = subparsers.add_parser("delete-opencode")
+    delete_opencode_parser.add_argument("refs", nargs="*", help="OpenCode session IDs or exact titles.")
+    delete_opencode_parser.add_argument("--contains", action="store_true", help="Allow a unique title substring match.")
+    delete_opencode_parser.add_argument("--title-prefix")
+    delete_opencode_parser.add_argument("--title-contains")
+    delete_opencode_parser.add_argument(
+        "--all-sessions",
+        action="store_true",
+        help="Allow matching child/subagent OpenCode sessions too. Deletion always removes the matched subtree.",
+    )
+    delete_opencode_parser.add_argument("--case-sensitive", action="store_true")
+    delete_opencode_parser.add_argument("--dry-run", action="store_true")
+    delete_opencode_parser.add_argument("--yes", action="store_true", help="Required for a real deletion.")
+    delete_opencode_parser.add_argument("--no-backup", action="store_true", help="Skip backup creation before deletion.")
+    delete_opencode_parser.add_argument("--backup-root", type=Path)
+
     delete_parser = subparsers.add_parser("delete-codex")
     delete_parser.add_argument("refs", nargs="*", help="Codex thread IDs or exact titles.")
     delete_parser.add_argument("--contains", action="store_true", help="Allow a unique title substring match.")
@@ -65,6 +89,10 @@ def _build_parser() -> argparse.ArgumentParser:
     restore_parser = subparsers.add_parser("restore-codex")
     restore_parser.add_argument("backup_dir", type=Path)
     restore_parser.add_argument("--force", action="store_true")
+
+    restore_opencode_parser = subparsers.add_parser("restore-opencode")
+    restore_opencode_parser.add_argument("backup_dir", type=Path)
+    restore_opencode_parser.add_argument("--force", action="store_true")
 
     return parser
 
@@ -100,6 +128,40 @@ def _handle_list_opencode(args: argparse.Namespace) -> int:
         if args.all_sessions:
             row["parent_id"] = session.parent_id or ""
         rows.append(row)
+    if args.as_json:
+        print(json.dumps(rows[: args.limit], indent=2, ensure_ascii=True))
+    else:
+        _print_rows(rows, limit=args.limit)
+    return 0
+
+
+def _searched_opencode_sessions(args: argparse.Namespace) -> list[dict[str, object]]:
+    store = OpenCodeStore()
+    matches = store.search_sessions(
+        title_prefix=args.title_prefix,
+        title_contains=args.title_contains,
+        include_child_sessions=args.all_sessions,
+        ignore_case=not args.case_sensitive,
+    )
+    rows = []
+    for match in matches:
+        row = {
+            "id": match.session_id,
+            "updated": match.updated_ms,
+            "title": match.title,
+            "matched_titles": " | ".join(match.matched_titles),
+            "directory": match.directory,
+        }
+        if args.all_sessions:
+            row["parent_id"] = match.parent_id or ""
+        rows.append(row)
+    return rows
+
+
+def _handle_search_opencode(args: argparse.Namespace) -> int:
+    if not args.title_prefix and not args.title_contains:
+        raise BridgeError("search-opencode requires --title-prefix or --title-contains.")
+    rows = _searched_opencode_sessions(args)
     if args.as_json:
         print(json.dumps(rows[: args.limit], indent=2, ensure_ascii=True))
     else:
@@ -156,6 +218,32 @@ def _handle_search_codex(args: argparse.Namespace) -> int:
     return 0
 
 
+def _unique_opencode_sessions_for_delete(
+    store: OpenCodeStore,
+    sessions: list,
+) -> list:
+    session_by_id = {session.id: session for session in store.list_sessions(include_child_sessions=True)}
+    selected_ids = {session.id for session in sessions}
+    unique_sessions = []
+    seen_session_ids = set()
+    for session in sessions:
+        if session.id in seen_session_ids:
+            continue
+        parent_id = session.parent_id
+        skip = False
+        while parent_id is not None:
+            if parent_id in selected_ids:
+                skip = True
+                break
+            parent = session_by_id.get(parent_id)
+            parent_id = parent.parent_id if parent is not None else None
+        if skip:
+            continue
+        seen_session_ids.add(session.id)
+        unique_sessions.append(session)
+    return unique_sessions
+
+
 def _handle_import(args: argparse.Namespace) -> int:
     opencode = OpenCodeStore()
     codex = CodexStore()
@@ -181,6 +269,58 @@ def _handle_import(args: argparse.Namespace) -> int:
             f"rollout={result.rollout_path}"
         )
         if index + 1 < len(args.refs):
+            print()
+    return 0
+
+
+def _handle_delete_opencode(args: argparse.Namespace) -> int:
+    if not args.dry_run and not args.yes:
+        raise BridgeError("delete-opencode is destructive. Re-run with --yes, or use --dry-run first.")
+    if not args.refs and not args.title_prefix and not args.title_contains:
+        raise BridgeError("delete-opencode requires explicit refs or a search filter.")
+
+    opencode = OpenCodeStore()
+    sessions = []
+    if args.refs:
+        sessions = [
+            opencode.resolve_session(
+                ref,
+                contains=args.contains,
+                include_child_sessions=args.all_sessions,
+            )
+            for ref in args.refs
+        ]
+    else:
+        matches = opencode.search_sessions(
+            title_prefix=args.title_prefix,
+            title_contains=args.title_contains,
+            include_child_sessions=args.all_sessions,
+            ignore_case=not args.case_sensitive,
+        )
+        sessions = [
+            opencode.resolve_session(match.session_id, include_child_sessions=True)
+            for match in matches
+        ]
+        if not sessions:
+            print("No rows found.")
+            return 0
+
+    unique_sessions = _unique_opencode_sessions_for_delete(opencode, sessions)
+    for index, session in enumerate(unique_sessions):
+        result = opencode.delete_session(
+            session,
+            backup_root=args.backup_root,
+            create_backup=not args.no_backup,
+            dry_run=args.dry_run,
+        )
+        prefix = "DRY RUN" if result.dry_run else "DELETED"
+        backup_text = str(result.backup_dir) if result.backup_dir is not None else "disabled"
+        print(
+            f"{prefix}: {result.session_id}  title={result.title!r}  backup={backup_text}  "
+            f"sessions={result.deleted_session_count}  messages={result.deleted_message_count}  "
+            f"parts={result.deleted_part_count}"
+        )
+        if index + 1 < len(unique_sessions):
             print()
     return 0
 
@@ -246,20 +386,37 @@ def _handle_restore(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_restore_opencode(args: argparse.Namespace) -> int:
+    opencode = OpenCodeStore()
+    result = opencode.restore_session_backup(args.backup_dir, force=args.force)
+    print(
+        f"RESTORED: {result.session_id}  title={result.title!r}  "
+        f"sessions={result.restored_session_count}  messages={result.restored_message_count}  "
+        f"parts={result.restored_part_count}"
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     try:
         if args.command == "list-opencode":
             return _handle_list_opencode(args)
+        if args.command == "search-opencode":
+            return _handle_search_opencode(args)
         if args.command == "list-codex":
             return _handle_list_codex(args)
         if args.command == "search-codex":
             return _handle_search_codex(args)
         if args.command == "import-opencode":
             return _handle_import(args)
+        if args.command == "delete-opencode":
+            return _handle_delete_opencode(args)
         if args.command == "delete-codex":
             return _handle_delete(args)
+        if args.command == "restore-opencode":
+            return _handle_restore_opencode(args)
         if args.command == "restore-codex":
             return _handle_restore(args)
         raise BridgeError(f"Unsupported command: {args.command}")

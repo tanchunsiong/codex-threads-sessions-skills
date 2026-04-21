@@ -275,6 +275,36 @@ class CodexSearchMatch:
     updated_ms: int
 
 
+@dataclass(slots=True)
+class OpenCodeSearchMatch:
+    session_id: str
+    title: str
+    matched_titles: list[str]
+    directory: str
+    parent_id: str | None
+    updated_ms: int
+
+
+@dataclass(slots=True)
+class OpenCodeDeleteResult:
+    session_id: str
+    title: str
+    backup_dir: Path | None
+    deleted_session_count: int
+    deleted_message_count: int
+    deleted_part_count: int
+    dry_run: bool
+
+
+@dataclass(slots=True)
+class OpenCodeRestoreResult:
+    session_id: str
+    title: str
+    restored_session_count: int
+    restored_message_count: int
+    restored_part_count: int
+
+
 def _string_matches(
     value: str,
     *,
@@ -299,11 +329,69 @@ def _string_matches(
 
 
 class OpenCodeStore:
-    def __init__(self, storage_root: Path | None = None) -> None:
-        self.storage_root = storage_root or Path.home() / ".local" / "share" / "opencode" / "storage"
+    def __init__(self, storage_root: Path | None = None, db_path: Path | None = None) -> None:
+        default_data_root = Path.home() / ".local" / "share" / "opencode"
+        self.storage_root = storage_root or default_data_root / "storage"
+        self.data_root = self.storage_root.parent
+        self.db_path = db_path or self.data_root / "opencode.db"
         self.session_root = self.storage_root / "session"
         self.message_root = self.storage_root / "message"
         self.part_root = self.storage_root / "part"
+
+    def _db_conn(self) -> sqlite3.Connection:
+        if not self.db_path.exists():
+            raise BridgeError(f"OpenCode database was not found at '{self.db_path}'.")
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
+
+    def _storage_session_files(self, session_id: str) -> list[Path]:
+        return sorted(self.session_root.rglob(f"{session_id}.json"))
+
+    def _session_stub(self, session_id: str, *, title: str, directory: str, parent_id: str | None) -> OpenCodeSession:
+        return OpenCodeSession(
+            info={
+                "id": session_id,
+                "title": title,
+                "directory": directory,
+                "parentID": parent_id,
+                "time": {"created": 0, "updated": 0},
+            },
+            messages=[],
+        )
+
+    def search_sessions(
+        self,
+        *,
+        title_prefix: str | None = None,
+        title_contains: str | None = None,
+        include_child_sessions: bool = False,
+        ignore_case: bool = True,
+    ) -> list[OpenCodeSearchMatch]:
+        if title_prefix is None and title_contains is None:
+            raise BridgeError("At least one search filter is required.")
+
+        matches: list[OpenCodeSearchMatch] = []
+        for session in self.list_sessions(include_child_sessions=include_child_sessions):
+            if not _string_matches(
+                session.title,
+                title_prefix=title_prefix,
+                title_contains=title_contains,
+                ignore_case=ignore_case,
+            ):
+                continue
+            matches.append(
+                OpenCodeSearchMatch(
+                    session_id=session.id,
+                    title=session.title,
+                    matched_titles=[session.title],
+                    directory=session.directory,
+                    parent_id=session.parent_id,
+                    updated_ms=session.updated_ms,
+                )
+            )
+        return matches
 
     def list_sessions(self, *, include_child_sessions: bool = False) -> list[OpenCodeSession]:
         sessions: dict[str, OpenCodeSession] = {}
@@ -410,6 +498,248 @@ class OpenCodeStore:
 
         messages.sort(key=lambda item: (item.created_ms, item.id))
         return OpenCodeSession(info=info, messages=messages)
+
+    def _subtree_rows(self, session_id: str) -> list[dict[str, Any]]:
+        with self._db_conn() as conn:
+            rows = conn.execute(
+                """
+                WITH RECURSIVE tree(id, depth) AS (
+                    SELECT id, 0 FROM session WHERE id = ?
+                    UNION ALL
+                    SELECT session.id, tree.depth + 1
+                    FROM session
+                    JOIN tree ON session.parent_id = tree.id
+                )
+                SELECT session.*, tree.depth
+                FROM tree
+                JOIN session ON session.id = tree.id
+                ORDER BY tree.depth ASC, session.time_updated DESC, session.id ASC
+                """,
+                (session_id,),
+            ).fetchall()
+        if not rows:
+            raise BridgeError(f"OpenCode session '{session_id}' was not found in the database.")
+        return [dict(row) for row in rows]
+
+    def _select_rows_for_session_ids(
+        self,
+        table: str,
+        session_ids: list[str],
+        *,
+        order_by: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if not session_ids:
+            return []
+        placeholders = ", ".join(["?"] * len(session_ids))
+        query = f"SELECT * FROM {table} WHERE session_id IN ({placeholders})"
+        if order_by:
+            query += f" ORDER BY {order_by}"
+        with self._db_conn() as conn:
+            rows = conn.execute(query, session_ids).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_session(
+        self,
+        session: OpenCodeSession,
+        *,
+        backup_root: Path | None = None,
+        create_backup: bool = True,
+        dry_run: bool = False,
+    ) -> OpenCodeDeleteResult:
+        session_rows = self._subtree_rows(session.id)
+        session_ids = [str(row["id"]) for row in session_rows]
+        message_rows = self._select_rows_for_session_ids("message", session_ids, order_by="time_created ASC, id ASC")
+        part_rows = self._select_rows_for_session_ids("part", session_ids, order_by="time_created ASC, id ASC")
+        session_entry_rows = self._select_rows_for_session_ids(
+            "session_entry",
+            session_ids,
+            order_by="time_created ASC, id ASC",
+        )
+        session_share_rows = self._select_rows_for_session_ids(
+            "session_share",
+            session_ids,
+            order_by="time_created ASC, session_id ASC",
+        )
+        todo_rows = self._select_rows_for_session_ids(
+            "todo",
+            session_ids,
+            order_by="position ASC, session_id ASC",
+        )
+
+        session_files: list[Path] = []
+        for session_id in session_ids:
+            session_files.extend(self._storage_session_files(session_id))
+
+        message_dirs = [
+            self.message_root / session_id
+            for session_id in session_ids
+            if (self.message_root / session_id).exists()
+        ]
+        part_dirs = [
+            self.part_root / str(row["id"])
+            for row in message_rows
+            if (self.part_root / str(row["id"])).exists()
+        ]
+
+        backup_dir: Path | None = None
+        if create_backup:
+            backup_root = backup_root or (self.data_root / "thread-bridge-backups")
+            timestamp = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S")
+            backup_dir = backup_root / f"{timestamp}-{session.id}"
+            backup_dir.mkdir(parents=True, exist_ok=True)
+
+            manifest = {
+                "root_session_id": session.id,
+                "title": session.title,
+                "captured_at": datetime.now(tz=timezone.utc).isoformat(),
+                "session_ids": session_ids,
+                "session_files": [str(path.relative_to(self.storage_root)) for path in session_files],
+                "message_dirs": [str(path.relative_to(self.storage_root)) for path in message_dirs],
+                "part_dirs": [str(path.relative_to(self.storage_root)) for path in part_dirs],
+            }
+            _json_dump(backup_dir / "manifest.json", manifest)
+            _json_dump(
+                backup_dir / "state.json",
+                {
+                    "session": [{k: v for k, v in row.items() if k != "depth"} for row in session_rows],
+                    "message": message_rows,
+                    "part": part_rows,
+                    "session_entry": session_entry_rows,
+                    "session_share": session_share_rows,
+                    "todo": todo_rows,
+                },
+            )
+
+            storage_backup_root = backup_dir / "files" / "storage"
+            for path in session_files:
+                target = storage_backup_root / path.relative_to(self.storage_root)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, target)
+            for path in message_dirs + part_dirs:
+                target = storage_backup_root / path.relative_to(self.storage_root)
+                shutil.copytree(path, target, dirs_exist_ok=True)
+
+        if not dry_run:
+            with self._db_conn() as conn:
+                for row in reversed(session_rows):
+                    conn.execute("DELETE FROM session WHERE id = ?", (row["id"],))
+                conn.commit()
+
+            for path in part_dirs:
+                if path.exists():
+                    shutil.rmtree(path)
+            for path in message_dirs:
+                if path.exists():
+                    shutil.rmtree(path)
+            for path in session_files:
+                if path.exists():
+                    path.unlink()
+
+        return OpenCodeDeleteResult(
+            session_id=session.id,
+            title=session.title,
+            backup_dir=backup_dir,
+            deleted_session_count=len(session_rows),
+            deleted_message_count=len(message_rows),
+            deleted_part_count=len(part_rows),
+            dry_run=dry_run,
+        )
+
+    def _insert_rows(self, conn: sqlite3.Connection, table: str, rows: list[dict[str, Any]]) -> None:
+        for row in rows:
+            columns = ", ".join(row.keys())
+            placeholders = ", ".join(["?"] * len(row))
+            conn.execute(
+                f"INSERT OR REPLACE INTO {table} ({columns}) VALUES ({placeholders})",
+                list(row.values()),
+            )
+
+    def restore_session_backup(self, backup_dir: Path, *, force: bool = False) -> OpenCodeRestoreResult:
+        manifest = _json_load(backup_dir / "manifest.json")
+        state_payload = _json_load(backup_dir / "state.json")
+        session_rows = list(state_payload.get("session", []))
+        if not session_rows:
+            raise BridgeError(f"Backup at '{backup_dir}' does not contain any OpenCode sessions.")
+
+        session_ids = [str(row["id"]) for row in session_rows]
+        root_session_id = str(manifest["root_session_id"])
+        title = str(manifest.get("title") or root_session_id)
+
+        with self._db_conn() as conn:
+            existing_rows = conn.execute(
+                f"SELECT id FROM session WHERE id IN ({', '.join(['?'] * len(session_ids))})",
+                session_ids,
+            ).fetchall()
+        existing_ids = {str(row["id"]) for row in existing_rows}
+        if existing_ids and not force:
+            joined = ", ".join(sorted(existing_ids))
+            raise BridgeError(
+                f"OpenCode session(s) already exist: {joined}. Use --force to replace the saved subtree."
+            )
+
+        if force and root_session_id in existing_ids:
+            root_row = next(row for row in session_rows if row["id"] == root_session_id)
+            current = self._session_stub(
+                root_session_id,
+                title=str(root_row.get("title") or title),
+                directory=str(root_row.get("directory") or Path.home()),
+                parent_id=root_row.get("parent_id"),
+            )
+            self.delete_session(current, create_backup=False, dry_run=False)
+            existing_ids.discard(root_session_id)
+
+        if force and existing_ids:
+            overlap_rows = [row for row in session_rows if row["id"] in existing_ids]
+            overlap_message_rows = self._select_rows_for_session_ids(
+                "message",
+                list(existing_ids),
+                order_by="time_created ASC, id ASC",
+            )
+            with self._db_conn() as conn:
+                for row in reversed(overlap_rows):
+                    conn.execute("DELETE FROM session WHERE id = ?", (row["id"],))
+                conn.commit()
+
+            for path in [
+                self.part_root / str(row["id"])
+                for row in overlap_message_rows
+                if (self.part_root / str(row["id"])).exists()
+            ]:
+                shutil.rmtree(path)
+            for session_id in existing_ids:
+                for path in self._storage_session_files(session_id):
+                    if path.exists():
+                        path.unlink()
+                message_dir = self.message_root / session_id
+                if message_dir.exists():
+                    shutil.rmtree(message_dir)
+
+        with self._db_conn() as conn:
+            self._insert_rows(conn, "session", session_rows)
+            self._insert_rows(conn, "message", list(state_payload.get("message", [])))
+            self._insert_rows(conn, "part", list(state_payload.get("part", [])))
+            self._insert_rows(conn, "session_entry", list(state_payload.get("session_entry", [])))
+            self._insert_rows(conn, "session_share", list(state_payload.get("session_share", [])))
+            self._insert_rows(conn, "todo", list(state_payload.get("todo", [])))
+            conn.commit()
+
+        storage_backup_root = backup_dir / "files" / "storage"
+        if storage_backup_root.exists():
+            for path in sorted(storage_backup_root.rglob("*")):
+                target = self.storage_root / path.relative_to(storage_backup_root)
+                if path.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, target)
+
+        return OpenCodeRestoreResult(
+            session_id=root_session_id,
+            title=title,
+            restored_session_count=len(session_rows),
+            restored_message_count=len(state_payload.get("message", [])),
+            restored_part_count=len(state_payload.get("part", [])),
+        )
 
 
 class CodexStore:

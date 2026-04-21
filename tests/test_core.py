@@ -307,5 +307,264 @@ class OpenCodeStoreScopeTests(unittest.TestCase):
             self.assertEqual(session.id, "ses_child")
 
 
+class OpenCodeDeleteRestoreTests(unittest.TestCase):
+    def _create_open_code_fixture(self, root: Path) -> tuple[Path, Path]:
+        storage_root = root / "storage"
+        session_root = storage_root / "session" / "global"
+        message_root = storage_root / "message"
+        part_root = storage_root / "part"
+        session_root.mkdir(parents=True)
+        message_root.mkdir(parents=True)
+        part_root.mkdir(parents=True)
+
+        db_path = root / "opencode.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("CREATE TABLE project (id TEXT PRIMARY KEY)")
+        conn.execute(
+            """
+            CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                parent_id TEXT,
+                slug TEXT NOT NULL,
+                directory TEXT NOT NULL,
+                title TEXT NOT NULL,
+                version TEXT NOT NULL,
+                share_url TEXT,
+                summary_additions INTEGER,
+                summary_deletions INTEGER,
+                summary_files INTEGER,
+                summary_diffs TEXT,
+                revert TEXT,
+                permission TEXT,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                time_compacting INTEGER,
+                time_archived INTEGER,
+                workspace_id TEXT,
+                FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES session(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE part (
+                id TEXT PRIMARY KEY,
+                message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL,
+                FOREIGN KEY(message_id) REFERENCES message(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE session_entry (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES session(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE session_share (
+                session_id TEXT PRIMARY KEY,
+                id TEXT NOT NULL,
+                secret TEXT NOT NULL,
+                url TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES session(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE todo (
+                session_id TEXT NOT NULL,
+                content TEXT NOT NULL,
+                status TEXT NOT NULL,
+                priority TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                PRIMARY KEY(session_id, position),
+                FOREIGN KEY(session_id) REFERENCES session(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute("INSERT INTO project (id) VALUES ('proj')")
+
+        sessions = [
+            ("ses_root", None, "Root Session", 1000, 2000, "/tmp/root"),
+            ("ses_child", "ses_root", "Child Session", 1100, 2100, "/tmp/child"),
+            ("ses_grand", "ses_child", "Grandchild Session", 1200, 2200, "/tmp/grand"),
+        ]
+        for session_id, parent_id, title, created, updated, directory in sessions:
+            conn.execute(
+                """
+                INSERT INTO session (
+                    id, project_id, parent_id, slug, directory, title, version, share_url,
+                    summary_additions, summary_deletions, summary_files, summary_diffs,
+                    revert, permission, time_created, time_updated, time_compacting,
+                    time_archived, workspace_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    "proj",
+                    parent_id,
+                    session_id,
+                    directory,
+                    title,
+                    "1.0.0",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    created,
+                    updated,
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            (session_root / f"{session_id}.json").write_text(
+                json.dumps(
+                    {
+                        "id": session_id,
+                        "title": title,
+                        "parentID": parent_id,
+                        "directory": directory,
+                        "time": {"created": created, "updated": updated},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+        messages = [
+            ("msg_root", "ses_root", "root text", 1300),
+            ("msg_child", "ses_child", "child text", 1400),
+            ("msg_grand", "ses_grand", "grand text", 1500),
+        ]
+        for message_id, session_id, text, created in messages:
+            conn.execute(
+                "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
+                (message_id, session_id, created, created, json.dumps({"id": message_id, "role": "user"})),
+            )
+            message_dir = message_root / session_id
+            message_dir.mkdir(parents=True, exist_ok=True)
+            (message_dir / f"{message_id}.json").write_text(
+                json.dumps({"id": message_id, "sessionID": session_id, "role": "user", "time": {"created": created}}),
+                encoding="utf-8",
+            )
+
+            part_id = f"prt_{message_id}"
+            conn.execute(
+                "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)",
+                (part_id, message_id, session_id, created, created, json.dumps({"id": part_id, "type": "text"})),
+            )
+            part_dir = part_root / message_id
+            part_dir.mkdir(parents=True, exist_ok=True)
+            (part_dir / f"{part_id}.json").write_text(
+                json.dumps({"id": part_id, "messageID": message_id, "sessionID": session_id, "type": "text"}),
+                encoding="utf-8",
+            )
+
+        conn.execute(
+            "INSERT INTO session_entry (id, session_id, type, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)",
+            ("entry_root", "ses_root", "note", 1600, 1600, json.dumps({"value": "root"})),
+        )
+        conn.execute(
+            "INSERT INTO session_share (session_id, id, secret, url, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?)",
+            ("ses_root", "share_root", "secret", "https://example.com/share", 1700, 1700),
+        )
+        conn.execute(
+            "INSERT INTO todo (session_id, content, status, priority, position, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("ses_child", "todo item", "open", "high", 0, 1800, 1800),
+        )
+        conn.commit()
+        conn.close()
+        return storage_root, db_path
+
+    def test_delete_and_restore_session_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            storage_root, db_path = self._create_open_code_fixture(temp_path)
+            backup_root = temp_path / "backups"
+            store = OpenCodeStore(storage_root=storage_root, db_path=db_path)
+
+            root_session = store.resolve_session("ses_root")
+            dry_run = store.delete_session(root_session, backup_root=backup_root, dry_run=True)
+
+            self.assertEqual(dry_run.deleted_session_count, 3)
+            self.assertEqual(dry_run.deleted_message_count, 3)
+            self.assertEqual(dry_run.deleted_part_count, 3)
+
+            conn = sqlite3.connect(db_path)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM session").fetchone()[0], 3)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM message").fetchone()[0], 3)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM part").fetchone()[0], 3)
+            conn.close()
+
+            result = store.delete_session(root_session, backup_root=backup_root)
+
+            self.assertIsNotNone(result.backup_dir)
+            conn = sqlite3.connect(db_path)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM session").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM message").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM part").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM session_entry").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM session_share").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM todo").fetchone()[0], 0)
+            conn.close()
+
+            self.assertFalse((storage_root / "session" / "global" / "ses_root.json").exists())
+            self.assertFalse((storage_root / "message" / "ses_root").exists())
+            self.assertFalse((storage_root / "part" / "msg_root").exists())
+
+            restored = store.restore_session_backup(result.backup_dir)
+
+            self.assertEqual(restored.restored_session_count, 3)
+            self.assertEqual(restored.restored_message_count, 3)
+            self.assertEqual(restored.restored_part_count, 3)
+
+            conn = sqlite3.connect(db_path)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM session").fetchone()[0], 3)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM message").fetchone()[0], 3)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM part").fetchone()[0], 3)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM session_entry").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM session_share").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM todo").fetchone()[0], 1)
+            conn.close()
+
+            self.assertTrue((storage_root / "session" / "global" / "ses_root.json").exists())
+            self.assertTrue((storage_root / "message" / "ses_root" / "msg_root.json").exists())
+            self.assertTrue((storage_root / "part" / "msg_root" / "prt_msg_root.json").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
