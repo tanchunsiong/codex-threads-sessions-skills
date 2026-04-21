@@ -51,7 +51,6 @@ python3 scripts/codex_thread_bridge.py restore-codex <backup-dir>
 Imported OpenCode sessions default to a Codex title of `opencode <original title>`. Use `--title-prefix` or `--title` if you need a different naming scheme.
 By default, OpenCode listing and import only consider top-level sessions, which matches the smaller set shown in OpenCode. Add `--all-sessions` if you want child/subagent sessions too.
 `delete-opencode` deletes the matched session plus all descendant child sessions in the same tree.
-Imported Codex threads use the current import time for their Codex `created_at` and `updated_at` values so they show up near the top of the Codex list.
 
 ## Safety
 

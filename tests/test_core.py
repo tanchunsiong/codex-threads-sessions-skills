@@ -5,7 +5,6 @@ import sqlite3
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -231,7 +230,7 @@ class CodexJsonlRewriteTests(unittest.TestCase):
 
             self.assertEqual(result.title, f"{DEFAULT_IMPORT_TITLE_PREFIX}Imported Session")
 
-    def test_import_uses_current_codex_timestamps(self) -> None:
+    def test_import_preserves_opencode_timestamps(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             codex_root = temp_path / ".codex"
@@ -286,10 +285,8 @@ class CodexJsonlRewriteTests(unittest.TestCase):
                 messages=[],
             )
 
-            before_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
             store = CodexStore(codex_root=codex_root)
             result = store.import_opencode_session(session, dry_run=False)
-            after_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
 
             conn = sqlite3.connect(state_db)
             row = conn.execute(
@@ -299,12 +296,8 @@ class CodexJsonlRewriteTests(unittest.TestCase):
             conn.close()
 
             self.assertIsNotNone(row)
-            self.assertGreaterEqual(row[0], before_ms)
-            self.assertLessEqual(row[0], after_ms)
-            self.assertGreaterEqual(row[1], before_ms)
-            self.assertLessEqual(row[1], after_ms)
-            self.assertNotEqual(row[0], 1000)
-            self.assertNotEqual(row[1], 2000)
+            self.assertEqual(row[0], 1000)
+            self.assertEqual(row[1], 2000)
 
 
 class OpenCodeStoreScopeTests(unittest.TestCase):
